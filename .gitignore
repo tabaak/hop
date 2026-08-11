@@ -1,0 +1,6 @@
+# Built binaries
+/hop
+/hopd
+
+# Local Claude Code settings (machine-specific paths)
+.claude

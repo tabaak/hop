@@ -3,6 +3,8 @@
 package client
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +27,14 @@ type Config struct {
 	// Subdomain is the requested name; empty asks the server to pick.
 	Subdomain string
 	Token     string
+	// TLS verifies the server certificate against the system roots. Off only
+	// for local development against a plaintext server.
+	TLS bool
+	// RootCAs overrides the trust store. Tests set it to trust a throwaway CA;
+	// production leaves it nil to use the system roots. Note this *replaces*
+	// the trust anchors rather than disabling verification — there is
+	// deliberately no skip-verify option.
+	RootCAs *x509.CertPool
 }
 
 // ErrRefused means the server rejected the tunnel for a reason that won't
@@ -35,7 +45,7 @@ var ErrRefused = errors.New("tunnel refused")
 // subdomain the server assigned, so a reconnect can ask for the same one and
 // the printed URL stays valid across a network blip.
 func Run(cfg Config) (assigned string, err error) {
-	conn, err := net.DialTimeout("tcp", cfg.Server, 10*time.Second)
+	conn, err := dial(cfg)
 	if err != nil {
 		return "", fmt.Errorf("dial %s: %w", cfg.Server, err)
 	}
@@ -65,6 +75,30 @@ func Run(cfg Config) (assigned string, err error) {
 		}
 		go forward(stream, cfg.Local)
 	}
+}
+
+// dial opens the control connection, wrapped in TLS unless disabled. The
+// server's certificate is checked against the system roots like any HTTPS
+// client would — there is no pinning and no skip-verify escape hatch, because
+// this connection carries the auth token.
+func dial(cfg Config) (net.Conn, error) {
+	netDialer := &net.Dialer{Timeout: 10 * time.Second}
+	if !cfg.TLS {
+		return netDialer.Dial("tcp", cfg.Server)
+	}
+	host, _, err := net.SplitHostPort(cfg.Server)
+	if err != nil {
+		return nil, fmt.Errorf("server address must be host:port: %w", err)
+	}
+	dialer := &tls.Dialer{
+		NetDialer: netDialer,
+		Config: &tls.Config{
+			ServerName: host,
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    cfg.RootCAs,
+		},
+	}
+	return dialer.Dial("tcp", cfg.Server)
 }
 
 func handshake(conn net.Conn, cfg Config) (proto.HelloAck, error) {

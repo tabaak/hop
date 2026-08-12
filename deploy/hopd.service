@@ -1,0 +1,53 @@
+[Unit]
+Description=hop tunnel server
+Documentation=https://github.com/tabaak/hop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hop
+Group=hop
+
+# Secrets live here, not in the command line, where `ps` would show them:
+#   CLOUDFLARE_API_TOKEN=...
+#   HOP_TOKENS=token1,token2
+EnvironmentFile=/etc/hop/hopd.env
+
+ExecStart=/usr/local/bin/hopd \
+    -domain hop.vokh.dev \
+    -email you@example.com \
+    -staging=false \
+    -cert-dir /var/lib/hop/certs
+
+Restart=always
+RestartSec=5s
+
+# Bind :80 and :443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Creates and owns /var/lib/hop. The ACME account key and certificates live
+# here and must survive restarts — losing them means re-issuing, which burns
+# Let's Encrypt rate limit.
+StateDirectory=hop
+StateDirectoryMode=0700
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

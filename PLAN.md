@@ -93,18 +93,25 @@ agent reconnect with backoff, same-token takeover of a live name.
 Note: the control port is **7443**, not 7000 — macOS binds 7000 for AirPlay
 Receiver, which makes local development confusing.
 
-### M2 — Wildcard TLS + deploy
+### M2 — Wildcard TLS + deploy — code done, not yet deployed
 
-**A wildcard cert can only be issued via DNS-01, not HTTP-01.** certmagic needs
-an API token for whoever hosts vokh.dev's DNS plus the matching `libdns`
-provider package.
+**A wildcard cert can only be issued via DNS-01, not HTTP-01.** HTTP-01 and
+TLS-ALPN-01 are disabled outright so a misconfiguration fails loudly rather than
+quietly issuing a non-wildcard certificate.
 
-Use the Let's Encrypt **staging** endpoint until the flow works end to end —
-production rate limits (5 duplicate certs/week) are easy to burn.
+Built:
+- `internal/certs` — certmagic + `libdns/cloudflare`, managing both
+  `hop.vokh.dev` and `*.hop.vokh.dev`
+- `:80` → 301 to https, `:443` → TLS ingress, `:7443` → TLS agent control
+- TLS on by default on both sides; `-tls=false` / `--no-tls` for local dev
+- `deploy/hopd.service` + `deploy/README.md`
+- End-to-end tests covering both the plaintext and TLS paths, the latter with a
+  throwaway CA so a broken chain fails the test
 
-- `:80` → 301 to https
-- `:443` → wildcard TLS, ingress
-- `:7443` → TLS, agent control
+The Cloudflare token needs **`Zone:Read` *and* `DNS:Edit`**. `DNS:Edit` alone
+fails at zone lookup with a confusing error.
+
+Remaining: run it on the VPS, against staging first.
 
 ### M3 — Real sessions ✅ mostly landed early in M1
 
@@ -135,9 +142,10 @@ for phishing within days. A static token file is sufficient.
 ## Environment
 
 - DNS: **Cloudflare** → `github.com/libdns/cloudflare` for the certmagic DNS-01 solver.
-  Needs an API token scoped to `Zone:DNS:Edit` on vokh.dev only (not the global key).
-  Keep the orange cloud **off** (DNS-only) for `*.hop.vokh.dev` — proxying through
-  Cloudflare would break the wildcard cert issuance and add a hop you don't want.
+  Needs a scoped API token (not the global key) with **both** `Zone:Read` and
+  `DNS:Edit` on vokh.dev. Keep the orange cloud **off** (DNS-only) for
+  `*.hop.vokh.dev` — proxying through Cloudflare terminates TLS at their edge,
+  which defeats the certificate and adds a hop you don't want.
 - VPS: **Ubuntu** → systemd unit, `ufw` for firewall.
 
 ## Deferred (not in scope)

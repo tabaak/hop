@@ -18,10 +18,11 @@ import (
 func main() {
 	fs := flag.NewFlagSet("hop http", flag.ExitOnError)
 	var (
-		serverAddr = fs.String("server", envOr("HOP_SERVER", "localhost:7443"), "hop server control address")
+		serverAddr = fs.String("server", envOr("HOP_SERVER", "hop.vokh.dev:7443"), "hop server control address")
 		sub        = fs.String("sub", "", "requested subdomain (default: server picks one)")
 		token      = fs.String("token", os.Getenv("HOP_TOKEN"), "agent token (or set HOP_TOKEN)")
 		host       = fs.String("local-host", "127.0.0.1", "local host to forward to")
+		noTLS      = fs.Bool("no-tls", false, "connect without TLS (local development only)")
 	)
 	fs.Usage = usage
 
@@ -47,6 +48,7 @@ func main() {
 		Local:     fmt.Sprintf("%s:%d", *host, port),
 		Subdomain: *sub,
 		Token:     *token,
+		TLS:       !*noTLS,
 	}
 
 	// Reconnect with backoff, because a laptop lid closing shouldn't end the
@@ -92,9 +94,10 @@ usage:
 
 flags:
   --sub <name>       requested subdomain (default: server picks one)
-  --server <addr>    control address (default $HOP_SERVER or localhost:7443)
+  --server <addr>    control address (default $HOP_SERVER or hop.vokh.dev:7443)
   --token <token>    agent token (default $HOP_TOKEN)
   --local-host <ip>  local host to forward to (default 127.0.0.1)
+  --no-tls           connect without TLS (local development only)
 `)
 }
 

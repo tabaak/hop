@@ -27,7 +27,8 @@ No certificates, no DNS, no VPS. Three terminals:
 python3 -m http.server 3000
 
 # 2. the server, plaintext
-go run ./cmd/hopd -tls=false -domain localhost -http :8080 -public-port 8080 -tokens dev-token
+go run ./cmd/hopd -ingress-tls=false -control-tls=false \
+    -domain localhost -ingress :8080 -public-port 8080 -tokens dev-token
 
 # 3. the agent, plaintext
 go run ./cmd/hop http 3000 --sub myapp --token dev-token --server localhost:7443 --no-tls
@@ -51,6 +52,11 @@ than silently serving plaintext in production.
 | 7443  | agent control connections, TLS                 |
 
 Not 7000: macOS binds it for AirPlay Receiver.
+
+hopd also runs behind an existing reverse proxy that already owns 80/443:
+`-ingress-tls=false -ingress 172.17.0.1:8080 -scheme https`. The proxy holds the
+wildcard; hopd keeps its own TLS on 7443, since the control connection speaks
+hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
 
 ## Behaviour worth knowing
 

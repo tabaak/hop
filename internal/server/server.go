@@ -115,7 +115,7 @@ func (s *Server) handleAgent(conn net.Conn) {
 		return
 	}
 
-	t := NewTunnel(sub, sess)
+	t := NewTunnel(sub, sess, s.cfg.PublicScheme)
 	s.reg.Bind(sub, gen, t)
 	log.Printf("agent %s: tunnel up for %q (%d live)", remote, sub, s.reg.Count())
 

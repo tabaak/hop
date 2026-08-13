@@ -14,18 +14,36 @@ Group=hop
 #   HOP_TOKENS=token1,token2
 EnvironmentFile=/etc/hop/hopd.env
 
+# This unit assumes hopd runs behind Caddy, which owns :80 and :443:
+#
+#   -ingress 172.17.0.1:8080  the Docker bridge address, reachable from the
+#                             Caddy container but not from the internet.
+#                             Confirm with `ip -4 addr show docker0`.
+#   -ingress-tls=false        Caddy terminates TLS for tunnel traffic.
+#   -scheme https             so agent URLs and X-Forwarded-Proto stay correct
+#                             even though the request reaching us is plaintext.
+#
+# The control listener keeps its own TLS: it speaks hop's protocol, not HTTP,
+# so it cannot be proxied. That is why hopd still needs a certificate — just
+# the bare name, not the wildcard Caddy holds.
+#
+# NOTE: -staging=true issues UNTRUSTED certificates against Let's Encrypt's
+# staging CA. That is deliberate for the first run — it proves the DNS-01
+# challenge works without burning production rate limit. Once the journal shows
+# "certificate ready", flip this to -staging=false, delete /var/lib/hop/certs,
+# and restart. See deploy/README.md.
 ExecStart=/usr/local/bin/hopd \
     -domain hop.vokh.dev \
-    -email you@example.com \
-    -staging=false \
-    -cert-dir /var/lib/hop/certs
+    -email viktorr200830@gmail.com \
+    -staging=true \
+    -cert-dir /var/lib/hop/certs \
+    -ingress 172.17.0.1:8080 \
+    -ingress-tls=false \
+    -scheme https \
+    -control :7443
 
 Restart=always
 RestartSec=5s
-
-# Bind :80 and :443 without running as root.
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 # Creates and owns /var/lib/hop. The ACME account key and certificates live
 # here and must survive restarts — losing them means re-issuing, which burns
@@ -33,6 +51,9 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 StateDirectory=hop
 StateDirectoryMode=0700
 
+# Both listening ports are above 1024, so no capability to bind low ports is
+# needed. Caddy owns :80 and :443.
+CapabilityBoundingSet=
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true

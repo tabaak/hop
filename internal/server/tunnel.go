@@ -21,7 +21,11 @@ type Tunnel struct {
 // request opens a fresh stream over the agent's long-lived connection, and
 // ReverseProxy handles hop-by-hop headers, streaming bodies and Upgrade
 // (WebSocket) requests for us.
-func NewTunnel(sub string, sess *yamux.Session) *Tunnel {
+//
+// publicScheme is what the browser used, which is not always what reached us:
+// behind a TLS-terminating reverse proxy the inbound request is plaintext even
+// though the client spoke HTTPS.
+func NewTunnel(sub string, sess *yamux.Session, publicScheme string) *Tunnel {
 	t := &Tunnel{Sub: sub, sess: sess}
 	t.proxy = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -32,7 +36,12 @@ func NewTunnel(sub string, sess *yamux.Session) *Tunnel {
 			// what you want (see --host-header in M4 for when it isn't).
 			r.Out.URL.Host = r.In.Host
 			r.Out.Host = r.In.Host
+			// Drops any inbound X-Forwarded-* rather than appending to them,
+			// so a client can't forge them.
 			r.SetXForwarded()
+			// ...then correct the scheme, which SetXForwarded takes from the
+			// connection that reached us rather than the one the client made.
+			r.Out.Header.Set("X-Forwarded-Proto", publicScheme)
 		},
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {

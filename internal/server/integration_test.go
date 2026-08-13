@@ -65,6 +65,36 @@ func TestTunnelPassesRequestDetails(t *testing.T) {
 	}
 }
 
+// Behind a TLS-terminating reverse proxy the request reaching hopd is
+// plaintext, but the browser used HTTPS. The local app must be told the
+// scheme the client actually used, or it will build http:// redirects and
+// absolute URLs.
+func TestForwardedProtoReflectsPublicScheme(t *testing.T) {
+	h := newHarnessScheme(t, false, "https")
+	if got := h.get(t, "myapp", "/proto"); got != "https" {
+		t.Errorf("X-Forwarded-Proto = %q, want %q", got, "https")
+	}
+}
+
+// A client must not be able to forge the forwarded headers.
+func TestForwardedProtoIgnoresClientHeader(t *testing.T) {
+	h := newHarnessScheme(t, false, "https")
+
+	req, _ := http.NewRequest("GET", h.ingress.URL+"/proto", nil)
+	req.Host = "myapp.localhost"
+	req.Header.Set("X-Forwarded-Proto", "gopher")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if string(body) != "https" {
+		t.Errorf("X-Forwarded-Proto = %q, want the client header to be overridden", body)
+	}
+}
+
 func TestUnknownSubdomainIs404(t *testing.T) {
 	h := newHarness(t, false)
 
@@ -88,20 +118,31 @@ type harness struct {
 
 func newHarness(t *testing.T, useTLS bool) *harness {
 	t.Helper()
+	return newHarnessScheme(t, useTLS, "http")
+}
+
+// newHarnessScheme builds a harness whose server advertises the given public
+// scheme, which differs from the scheme reaching it when hopd sits behind a
+// TLS-terminating reverse proxy.
+func newHarnessScheme(t *testing.T, useTLS bool, scheme string) *harness {
+	t.Helper()
 
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/echo" {
+		switch r.URL.Path {
+		case "/echo":
 			body, _ := io.ReadAll(r.Body)
 			io.WriteString(w, r.Method+" "+r.URL.RequestURI()+" "+string(body))
-			return
+		case "/proto":
+			io.WriteString(w, r.Header.Get("X-Forwarded-Proto"))
+		default:
+			io.WriteString(w, "local app saw "+r.URL.Path)
 		}
-		io.WriteString(w, "local app saw "+r.URL.Path)
 	}))
 	t.Cleanup(app.Close)
 
 	srv := server.New(server.Config{
 		Domain:       "localhost",
-		PublicScheme: "http",
+		PublicScheme: scheme,
 		Tokens:       map[string]bool{testToken: true},
 	})
 

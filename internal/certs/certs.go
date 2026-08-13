@@ -18,9 +18,8 @@ import (
 )
 
 type Config struct {
-	// Domain is the zone tunnels live under, e.g. "hop.vokh.dev". Both it and
-	// "*." + Domain go on the certificate: the wildcard serves tunnels, the
-	// bare name serves the control listener agents dial.
+	// Domain is the zone tunnels live under, e.g. "hop.vokh.dev". The bare name
+	// serves the control listener agents dial; see Wildcard for tunnel traffic.
 	Domain string
 	// Email is the ACME account contact. Let's Encrypt uses it for expiry
 	// warnings; optional but strongly advised.
@@ -35,6 +34,11 @@ type Config struct {
 	// Staging uses the Let's Encrypt staging CA, which issues untrusted certs
 	// against far looser rate limits. Always start here.
 	Staging bool
+	// Wildcard also covers "*." + Domain, which is needed only when we
+	// terminate TLS for tunnel traffic ourselves. Behind a reverse proxy the
+	// proxy holds the wildcard and we only need the bare name for the control
+	// listener — so don't ask for a wildcard we won't serve.
+	Wildcard bool
 }
 
 // TLSConfig obtains the certificate (blocking until it's in hand) and returns a
@@ -73,7 +77,10 @@ func TLSConfig(ctx context.Context, cfg Config) (*tls.Config, error) {
 	magic := certmagic.NewDefault()
 	magic.Issuers = []certmagic.Issuer{certmagic.NewACMEIssuer(magic, acme)}
 
-	names := []string{cfg.Domain, "*." + cfg.Domain}
+	names := []string{cfg.Domain}
+	if cfg.Wildcard {
+		names = append(names, "*."+cfg.Domain)
+	}
 	if err := magic.ManageSync(ctx, names); err != nil {
 		return nil, fmt.Errorf("certs: obtaining %v: %w", names, err)
 	}

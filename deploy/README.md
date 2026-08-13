@@ -76,6 +76,79 @@ Generate the agent token with something like `openssl rand -hex 32`. Anyone
 holding it can open tunnels on your domain, so treat it as a password.
 `HOP_TOKENS` is comma-separated if you want more than one.
 
+## 4b. Behind an existing Caddy
+
+Skip this section if nothing else is on :80/:443.
+
+If a Caddy container already owns those ports, it fronts hop instead: it holds
+the wildcard certificate and reverse-proxies tunnel traffic to hopd on the
+Docker bridge address. hopd keeps its own TLS on :7443, because the control
+connection speaks hop's protocol rather than HTTP and cannot be proxied.
+
+```
+:443 Caddy ── existing site   → app container
+            └─ *.hop.vokh.dev → 172.17.0.1:8080 (hopd, plaintext)
+:7443 hopd control, own certificate for the bare domain
+```
+
+**The stock `caddy` image cannot do this.** It ships no DNS provider plugins, so
+it can only solve HTTP-01 and TLS-ALPN-01 — neither of which can validate a
+wildcard. The binary needs rebuilding with the Cloudflare module; see
+`deploy/caddy/Dockerfile`.
+
+1. Copy `deploy/caddy/Dockerfile` next to your compose file, e.g. `./caddy/Dockerfile`.
+
+2. Confirm the bridge address hopd should bind, and correct the unit if it differs:
+
+   ```sh
+   ip -4 addr show docker0 | grep inet
+   ```
+
+   `172.17.0.1` is the default. This address is reachable from containers but
+   not from the internet, which is why hopd's plaintext ingress is safe there.
+
+3. In `docker-compose.yml`, for the caddy service:
+
+   ```yaml
+   caddy:
+     build: ./caddy          # replaces: image: caddy:2-alpine
+     extra_hosts:
+       - "host.docker.internal:host-gateway"
+     environment:
+       - CF_API_TOKEN=${CF_API_TOKEN}
+   ```
+
+4. Put the same Cloudflare token in a `.env` beside the compose file, so Caddy
+   can solve DNS-01 too:
+
+   ```sh
+   echo 'CF_API_TOKEN=<the scoped token>' >> .env
+   chmod 600 .env
+   ```
+
+5. Append to the Caddyfile:
+
+   ```
+   *.hop.vokh.dev {
+       tls {
+           dns cloudflare {env.CF_API_TOKEN}
+       }
+       reverse_proxy host.docker.internal:8080
+   }
+   ```
+
+6. Build and roll out, checking the existing site still works **before**
+   touching hop:
+
+   ```sh
+   docker compose build caddy
+   docker compose up -d caddy
+   docker compose logs -f caddy
+   curl -I https://<your existing site>
+   ```
+
+   Rollback is putting `image: caddy:2-alpine` back and re-running `up -d`.
+
 ## 5. Firewall
 
 ```sh

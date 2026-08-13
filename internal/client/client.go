@@ -3,6 +3,7 @@
 package client
 
 import (
+	"bufio"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"time"
 
@@ -35,6 +37,13 @@ type Config struct {
 	// the trust anchors rather than disabling verification — there is
 	// deliberately no skip-verify option.
 	RootCAs *x509.CertPool
+	// HostHeader replaces the Host the local app sees. Empty passes the public
+	// host through untouched, which is the default and usually what you want.
+	HostHeader string
+	// Log, if set, is called once per request with the status and the time to
+	// the first byte of the response. Called from the per-stream goroutine, so
+	// it must be safe for concurrent use.
+	Log func(method, target string, status int, took time.Duration)
 }
 
 // ErrRefused means the server rejected the tunnel for a reason that won't
@@ -73,7 +82,7 @@ func Run(cfg Config) (assigned string, err error) {
 		if err != nil {
 			return assigned, fmt.Errorf("tunnel closed: %w", err)
 		}
-		go forward(stream, cfg.Local)
+		go forward(stream, cfg)
 	}
 }
 
@@ -123,23 +132,64 @@ func handshake(conn net.Conn, cfg Config) (proto.HelloAck, error) {
 	return ack, nil
 }
 
-// forward splices one inbound stream to the local app. Because this is a raw
-// byte copy rather than an HTTP round trip, WebSockets, SSE and streaming
-// bodies all pass through untouched.
-func forward(stream net.Conn, local string) {
+// forward hands one inbound stream to the local app. The request head is read
+// so it can be logged and, optionally, have its Host rewritten; everything
+// after it is a raw byte copy in both directions, which is why WebSockets, SSE
+// and streaming bodies pass through untouched.
+func forward(stream net.Conn, cfg Config) {
 	defer stream.Close()
 
-	up, err := net.DialTimeout("tcp", local, 5*time.Second)
+	src := bufio.NewReader(stream)
+	head, headErr := readHead(src)
+	var method, target string
+	if headErr == nil {
+		method, target = requestLine(head)
+	}
+
+	// Started before the dial so a slow or refused connection to the local app
+	// is reflected in the reported duration.
+	start := time.Now()
+
+	up, err := net.DialTimeout("tcp", cfg.Local, 5*time.Second)
 	if err != nil {
-		log.Printf("local %s unreachable: %v", local, err)
-		writeGatewayError(stream, local)
+		log.Printf("local %s unreachable: %v", cfg.Local, err)
+		if cfg.Log != nil {
+			cfg.Log(method, target, http.StatusBadGateway, time.Since(start))
+		}
+		writeGatewayError(stream, cfg.Local)
 		return
 	}
 	defer up.Close()
 
+	if headErr != nil {
+		// Not HTTP-shaped, or a head too large to buffer. Splice it anyway
+		// rather than dropping the connection; only the log line is lost.
+		splice(stream, src, up, up)
+		return
+	}
+	if cfg.HostHeader != "" {
+		head = setHost(head, cfg.HostHeader)
+	}
+	if _, err := up.Write(head); err != nil {
+		return
+	}
+
+	var down io.Reader = up
+	if cfg.Log != nil {
+		down = &sniffer{r: up, onLine: func(line string) {
+			cfg.Log(method, target, statusOf(line), time.Since(start))
+		}}
+	}
+	splice(stream, src, up, down)
+}
+
+// splice copies both directions and returns once each has finished. src and
+// down are read from rather than the raw connections, so buffered bytes and
+// the response sniffer are not bypassed.
+func splice(stream net.Conn, src io.Reader, up net.Conn, down io.Reader) {
 	done := make(chan struct{})
 	go func() {
-		io.Copy(up, stream)
+		io.Copy(up, src)
 		// Half-close so the local app sees EOF and can respond to a request
 		// whose body has ended.
 		if c, ok := up.(*net.TCPConn); ok {
@@ -147,7 +197,7 @@ func forward(stream net.Conn, local string) {
 		}
 		close(done)
 	}()
-	io.Copy(stream, up)
+	io.Copy(stream, down)
 	<-done
 }
 

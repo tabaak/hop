@@ -100,8 +100,7 @@ pkpways.vokh.dev on the same VPS. Verified end to end from a laptop: 200 through
 the tunnel, valid production wildcard, 5MB body byte-identical, 20 concurrent
 requests, correct X-Forwarded-Proto, hop's own 404 for unclaimed names.
 
-Untested: WebSocket upgrades. The design should carry them (raw byte splice,
-Caddy handles Upgrade natively) but nothing has demonstrated it.
+Untested at the time: WebSocket upgrades — since covered in M4.
 
 
 **A wildcard cert can only be issued via DNS-01, not HTTP-01.** HTTP-01 and
@@ -132,12 +131,34 @@ Remaining:
 - Tokens from a file rather than a flag/env, so adding one doesn't need a restart
 - `~/.hop.yaml` client config, so `--token` isn't needed on every invocation
 
-### M4 — Polish
+### M4 — Polish ✅ done
 
-- Live request log in agent terminal: `GET /api/users 200 12ms`
-- `--host-header rewrite` (Vite and some frameworks reject unknown Host values)
-- systemd unit with `AmbientCapabilities=CAP_NET_BIND_SERVICE` — do not run as root
-- `hop http 3000`, `hop http 3000 --sub myapp`
+- Live request log in the agent terminal, on by default, `--quiet` to silence
+- `--host-header preserve|rewrite|<literal>`
+- systemd: the deployed unit needs no low ports at all (Caddy owns 80/443), so
+  it keeps an empty `CapabilityBoundingSet`. The standalone recipe, with
+  `AmbientCapabilities=CAP_NET_BIND_SERVICE`, is documented in the unit.
+- `hop http 3000`, `hop http 3000 --sub myapp` — landed in M1
+
+The log required teaching the agent a little HTTP, which it had deliberately
+avoided. The compromise: read the request head, then splice the rest raw. That
+is only sound because the server sets `DisableKeepAlives`, making each yamux
+stream carry exactly one request — if that ever changes, the head parsing has
+to become a loop. A head that is malformed or larger than 64KB falls back to a
+plain splice, so a parse failure costs a log line rather than the connection.
+
+Response status is captured by a sniffer that watches bytes flow past without
+buffering them, so the reported duration is time-to-first-byte. Waiting for the
+connection to close would report nothing until a WebSocket disconnected.
+
+**WebSocket upgrades are now tested** (`TestUpgradeSurvivesTunnel`) — 101 plus
+bidirectional traffic afterwards, using a hijacking handler rather than a real
+WebSocket library so the suite gains no dependency. This closes the gap M2 left
+open.
+
+Known wart: hopd's own server-side log records 200 for an upgraded connection,
+since `ReverseProxy` hijacks and the status recorder never sees the 101. The
+agent-side log reports it correctly.
 
 ## Decisions
 

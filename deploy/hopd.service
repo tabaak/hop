@@ -53,6 +53,18 @@ StateDirectoryMode=0700
 
 # Both listening ports are above 1024, so no capability to bind low ports is
 # needed. Caddy owns :80 and :443.
+#
+# Running hopd standalone instead — owning :80 and :443 itself — means binding
+# privileged ports, which is the usual excuse for running as root. Don't.
+# Replace the empty set below with:
+#
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+#   CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+#
+# Both lines are needed: the bounding set caps what the process may ever hold,
+# and the ambient set is what it actually starts with. Granting the capability
+# is strictly narrower than User=root, which would also permit reading every
+# file on the host and rewriting the firewall.
 CapabilityBoundingSet=
 NoNewPrivileges=true
 PrivateTmp=true

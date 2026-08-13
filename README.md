@@ -22,6 +22,8 @@ hop http <port> [flags]
 | `--server <host:port>`| `$HOP_SERVER`, else `hop.vokh.dev:7443`    |
 | `--token <token>`     | `$HOP_TOKEN`                               |
 | `--local-host <ip>`   | `127.0.0.1`                                |
+| `--host-header <v>`   | `preserve`; or `rewrite`, or a literal value |
+| `--quiet`             | off; suppresses the request log            |
 | `--no-tls`            | off; local development only                |
 
 Put the server and token in your shell profile once, and the everyday
@@ -51,7 +53,30 @@ hop http 8080 --local-host 192.168.1.42
 # A different token or server for a one-off, without editing the profile
 hop http 3000 --token "$OTHER_TOKEN"
 hop http 3000 --server staging.example.com:7443
+
+# Vite and friends reject a Host they don't recognise — show them their own
+hop http 5173 --host-header rewrite
+
+# Or name the Host explicitly
+hop http 3000 --host-header app.internal
+
+# No request log
+hop http 3000 --quiet
 ```
+
+Requests are logged live to stderr as they complete:
+
+```
+  GET    200     12ms  /api/users
+  POST   201      4ms  /api/users
+  GET    404    0.8ms  /favicon.ico
+  GET    101      2ms  /ws
+```
+
+The duration is **time to the first byte of the response**, not time to close.
+For a WebSocket or an SSE stream those differ by the whole life of the
+connection, and the latter would mean seeing nothing in the log until the user
+navigated away.
 
 `Ctrl-C` releases the name immediately.
 
@@ -162,8 +187,14 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
   rather than spinning.
 - **The agent verifies the server certificate** against the system roots. There
   is no skip-verify flag; the control connection carries your auth token.
-- **The local app sees the public Host header** (`myapp.hop.vokh.dev`). Vite and
-  a few other dev servers reject unknown hosts; `--host-header rewrite` is M4.
+- **The local app sees the public Host header** (`myapp.hop.vokh.dev`) unless
+  you pass `--host-header`. That default is right for most apps — links and
+  redirects they build point back through the tunnel — but dev servers with
+  host allowlists reject it, which is what `--host-header rewrite` is for.
+- **The agent parses only the request head.** Everything after it is a raw byte
+  copy, which is what lets an upgraded connection carry arbitrary framing. This
+  is safe only because the server disables keep-alives on its side of the
+  tunnel, so each stream carries exactly one request.
 - **Reconnects back off** from 1s to 30s. A session that survives 30s resets the
   backoff, so an overnight tunnel doesn't crawl after one blip.
 - **A dead local app returns a readable 502** through the tunnel rather than a
@@ -172,14 +203,12 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
 ## Not yet
 
 - **One tunnel per process.** Two ports means two terminals.
-- **No request log.** You get the URL banner and nothing else — the live
-  `GET /api/users 200 12ms` line is M4.
 - **HTTP only.** No raw TCP, so no tunnelling Postgres or SSH.
 - **The token must be in the environment or on the command line.** A
   `~/.hop.yaml` config is an open M3 item.
-- **WebSocket upgrades are unverified.** The design should carry them — the
-  agent splices raw bytes rather than round-tripping HTTP — but nothing has
-  demonstrated it.
+- **hopd's own server-side log reports 200 for upgraded connections.** The
+  agent-side log gets this right; the server's status recorder doesn't see the
+  101 because ReverseProxy hijacks the connection.
 
 ## Tests
 

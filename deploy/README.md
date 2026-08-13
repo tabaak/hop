@@ -159,6 +159,48 @@ ufw allow 7443/tcp   # agent control connections
 ufw enable
 ```
 
+`ufw enable` applies a default-deny policy immediately, so the rule for 22 has
+to exist *before* it runs or it drops your current SSH session.
+
+Note that **Docker's published ports bypass ufw entirely** — it writes its own
+rules in the `DOCKER-USER` chain, evaluated first. On a Docker host, ufw only
+governs ports held by non-container processes.
+
+### Oracle Cloud
+
+Oracle's Ubuntu images ship a restrictive `iptables` INPUT chain ending in
+`REJECT ... icmp-host-prohibited`, and instances additionally sit behind a VCN
+security list. **Both** layers must permit a port.
+
+In the OCI console: Networking → Virtual Cloud Networks → your VCN → Security
+Lists → default → Add Ingress Rule, source `0.0.0.0/0`, TCP, port `7443`.
+
+On the host, insert before the REJECT rule and persist:
+
+```sh
+REJECT_LINE=$(sudo iptables -L INPUT -n --line-numbers | awk '/REJECT/ {print $1; exit}')
+sudo iptables -I INPUT "$REJECT_LINE" -p tcp --dport 7443 -m state --state NEW -j ACCEPT
+sudo netfilter-persistent save
+```
+
+**If hopd runs behind a containerised proxy, the same chain blocks the proxy
+from reaching it.** Traffic from a container to a host bridge address goes
+through INPUT, so the plaintext ingress port needs a rule too:
+
+```sh
+REJECT_LINE=$(sudo iptables -L INPUT -n --line-numbers | awk '/REJECT/ {print $1; exit}')
+sudo iptables -I INPUT "$REJECT_LINE" -s 172.16.0.0/12 -d 172.17.0.1 -p tcp --dport 8080 -m state --state NEW -j ACCEPT
+sudo netfilter-persistent save
+```
+
+Scoped to Docker's private ranges and the bridge address, so it isn't publicly
+reachable — and hopd binds only that address anyway. The symptom without it is
+a **502 from the proxy**, and `nc` from inside the container reporting
+`Host is unreachable` (which is the ICMP that `reject-with icmp-host-prohibited`
+produces). When testing reachability, probe the *actual* port — a probe against
+port 22 succeeds because 22 is in the allowlist, and proves only that routing
+works.
+
 ## 6. Install the unit
 
 ```sh

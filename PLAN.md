@@ -93,7 +93,16 @@ agent reconnect with backoff, same-token takeover of a live name.
 Note: the control port is **7443**, not 7000 — macOS binds 7000 for AirPlay
 Receiver, which makes local development confusing.
 
-### M2 — Wildcard TLS + deploy — code done, not yet deployed
+### M2 — Wildcard TLS + deploy ✅ live since 2026-08-13
+
+Running at `https://<name>.hop.vokh.dev`, behind the Caddy that already serves
+pkpways.vokh.dev on the same VPS. Verified end to end from a laptop: 200 through
+the tunnel, valid production wildcard, 5MB body byte-identical, 20 concurrent
+requests, correct X-Forwarded-Proto, hop's own 404 for unclaimed names.
+
+Untested: WebSocket upgrades. The design should carry them (raw byte splice,
+Caddy handles Upgrade natively) but nothing has demonstrated it.
+
 
 **A wildcard cert can only be issued via DNS-01, not HTTP-01.** HTTP-01 and
 TLS-ALPN-01 are disabled outright so a misconfiguration fails loudly rather than

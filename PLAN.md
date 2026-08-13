@@ -120,7 +120,7 @@ Built:
 The Cloudflare token needs **`Zone:Read` *and* `DNS:Edit`**. `DNS:Edit` alone
 fails at zone lookup with a confusing error.
 
-Remaining: run it on the VPS, against staging first.
+Deployed to the VPS, staging first, then production.
 
 ### M3 — Real sessions ✅ mostly landed early in M1
 

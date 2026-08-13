@@ -6,16 +6,102 @@ See [PLAN.md](PLAN.md) for the architecture, [deploy/](deploy/) for running it
 on a VPS.
 
 **Status: M2** — HTTP tunnels over TLS, with a wildcard certificate obtained
-automatically via ACME DNS-01. Not yet deployed.
+automatically via ACME DNS-01. Live at `*.hop.vokh.dev`.
 
-## Using it
+## hop — the agent
+
+One subcommand. Anything else prints usage and exits 2.
 
 ```sh
-export HOP_SERVER=hop.vokh.dev:7443
-export HOP_TOKEN=<your token>
+hop http <port> [flags]
+```
 
-hop http 3000              # https://brave-otter.hop.vokh.dev
-hop http 3000 --sub myapp  # https://myapp.hop.vokh.dev
+| Flag                  | Default                                    |
+|-----------------------|--------------------------------------------|
+| `--sub <name>`        | server picks a random name                 |
+| `--server <host:port>`| `$HOP_SERVER`, else `hop.vokh.dev:7443`    |
+| `--token <token>`     | `$HOP_TOKEN`                               |
+| `--local-host <ip>`   | `127.0.0.1`                                |
+| `--no-tls`            | off; local development only                |
+
+Put the server and token in your shell profile once, and the everyday
+invocation is two words:
+
+```sh
+export HOP_SERVER="hop.vokh.dev:7443"
+export HOP_TOKEN="<your token>"
+```
+
+```sh
+# Random name
+hop http 3000
+#   https://brave-otter.hop.vokh.dev  →  http://127.0.0.1:3000
+
+# Claim a specific name
+hop http 3000 --sub myapp
+#   https://myapp.hop.vokh.dev  →  http://127.0.0.1:3000
+
+# Two tunnels at once — separate terminals, separate names
+hop http 3000 --sub web
+hop http 8000 --sub docs
+
+# Something running in a VM, a container, or elsewhere on the LAN
+hop http 8080 --local-host 192.168.1.42
+
+# A different token or server for a one-off, without editing the profile
+hop http 3000 --token "$OTHER_TOKEN"
+hop http 3000 --server staging.example.com:7443
+```
+
+`Ctrl-C` releases the name immediately.
+
+Subdomains must match `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`, and a handful of
+names are reserved (`www`, `api`, `admin`, `app`, `mail`, `hop`, …).
+
+## hopd — the server
+
+Standard Go flags, so `-domain` and `--domain` are equivalent. Tokens come from
+`-tokens` or `HOP_TOKENS`; with neither, it refuses to start.
+
+| Flag            | Default               |                                              |
+|-----------------|-----------------------|----------------------------------------------|
+| `-domain`       | `hop.vokh.dev`        | zone tunnels live under                      |
+| `-ingress`      | `:443`                | public ingress address                       |
+| `-redirect`     | `:80`                 | HTTP→HTTPS redirect; empty disables          |
+| `-control`      | `:7443`               | agent control address                        |
+| `-ingress-tls`  | `true`                | terminate TLS on the ingress                 |
+| `-control-tls`  | `true`                | terminate TLS on the control listener        |
+| `-scheme`       | auto                  | `https` if `-ingress-tls`, else `http`       |
+| `-public-port`  | empty                 | port appended to agent-facing URLs           |
+| `-tokens`       | `$HOP_TOKENS`         | comma-separated                              |
+| `-email`        | empty                 | ACME account, for expiry notices             |
+| `-staging`      | `true`                | staging CA; `false` for real certificates    |
+| `-cert-dir`     | `/var/lib/hop/certs`  | ACME account key and certificates            |
+
+```sh
+# Standalone, owning :80 and :443, real wildcard certificate
+hopd -domain hop.vokh.dev -email you@example.com -staging=false
+
+# Behind a reverse proxy that already owns those ports
+hopd -domain hop.vokh.dev -email you@example.com -staging=false \
+    -ingress 172.17.0.1:8080 -ingress-tls=false -scheme https -control :7443
+```
+
+`-staging` **defaults to true**, so a hand-run `hopd` issues untrusted
+certificates unless told otherwise. That's deliberate: Let's Encrypt allows five
+duplicate certificates per week, and a misconfigured DNS token burns through
+that in an afternoon.
+
+`-scheme https` matters in the proxied form. The request arriving from the proxy
+is plaintext, so without it hopd hands agents `http://` URLs and sends the wrong
+`X-Forwarded-Proto` downstream.
+
+The second form is what [`deploy/hopd.service`](deploy/hopd.service) runs, so in
+production you drive it through systemd rather than by hand:
+
+```sh
+sudo systemctl restart hopd
+sudo journalctl -u hopd -f
 ```
 
 ## Local development
@@ -78,6 +164,22 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
   is no skip-verify flag; the control connection carries your auth token.
 - **The local app sees the public Host header** (`myapp.hop.vokh.dev`). Vite and
   a few other dev servers reject unknown hosts; `--host-header rewrite` is M4.
+- **Reconnects back off** from 1s to 30s. A session that survives 30s resets the
+  backoff, so an overnight tunnel doesn't crawl after one blip.
+- **A dead local app returns a readable 502** through the tunnel rather than a
+  bare connection reset.
+
+## Not yet
+
+- **One tunnel per process.** Two ports means two terminals.
+- **No request log.** You get the URL banner and nothing else — the live
+  `GET /api/users 200 12ms` line is M4.
+- **HTTP only.** No raw TCP, so no tunnelling Postgres or SSH.
+- **The token must be in the environment or on the command line.** A
+  `~/.hop.yaml` config is an open M3 item.
+- **WebSocket upgrades are unverified.** The design should carry them — the
+  agent splices raw bytes rather than round-tripping HTTP — but nothing has
+  demonstrated it.
 
 ## Tests
 

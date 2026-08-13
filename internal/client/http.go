@@ -96,6 +96,30 @@ func setHost(head []byte, host string) []byte {
 	return out
 }
 
+// headerValue returns the value of the named header, which must be given in
+// lower case. Returns "" if absent. Only the first occurrence is considered.
+func headerValue(head []byte, name string) string {
+	rest := head
+	// Skip the request line.
+	if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+		rest = rest[i+1:]
+	}
+	prefix := name + ":"
+
+	for len(rest) > 0 {
+		line := rest
+		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+			line, rest = rest[:i], rest[i+1:]
+		} else {
+			rest = nil
+		}
+		if hasPrefixFold(line, prefix) {
+			return string(bytes.TrimSpace(line[len(prefix):]))
+		}
+	}
+	return ""
+}
+
 func hasPrefixFold(b []byte, prefix string) bool {
 	return len(b) >= len(prefix) && strings.EqualFold(string(b[:len(prefix)]), prefix)
 }

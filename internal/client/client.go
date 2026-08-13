@@ -40,10 +40,19 @@ type Config struct {
 	// HostHeader replaces the Host the local app sees. Empty passes the public
 	// host through untouched, which is the default and usually what you want.
 	HostHeader string
-	// Log, if set, is called once per request with the status and the time to
-	// the first byte of the response. Called from the per-stream goroutine, so
-	// it must be safe for concurrent use.
-	Log func(method, target string, status int, took time.Duration)
+	// Log, if set, is called once per request. Called from the per-stream
+	// goroutine, so it must be safe for concurrent use.
+	Log func(Request)
+}
+
+// Request is one logged request. Status and Took are filled in when the
+// response status line comes back, so Took is time to first byte.
+type Request struct {
+	Method    string
+	Target    string
+	Status    int
+	Took      time.Duration
+	UserAgent string
 }
 
 // ErrRefused means the server rejected the tunnel for a reason that won't
@@ -141,9 +150,10 @@ func forward(stream net.Conn, cfg Config) {
 
 	src := bufio.NewReader(stream)
 	head, headErr := readHead(src)
-	var method, target string
+	var rec Request
 	if headErr == nil {
-		method, target = requestLine(head)
+		rec.Method, rec.Target = requestLine(head)
+		rec.UserAgent = headerValue(head, "user-agent")
 	}
 
 	// Started before the dial so a slow or refused connection to the local app
@@ -154,7 +164,8 @@ func forward(stream net.Conn, cfg Config) {
 	if err != nil {
 		log.Printf("local %s unreachable: %v", cfg.Local, err)
 		if cfg.Log != nil {
-			cfg.Log(method, target, http.StatusBadGateway, time.Since(start))
+			rec.Status, rec.Took = http.StatusBadGateway, time.Since(start)
+			cfg.Log(rec)
 		}
 		writeGatewayError(stream, cfg.Local)
 		return
@@ -177,7 +188,8 @@ func forward(stream net.Conn, cfg Config) {
 	var down io.Reader = up
 	if cfg.Log != nil {
 		down = &sniffer{r: up, onLine: func(line string) {
-			cfg.Log(method, target, statusOf(line), time.Since(start))
+			rec.Status, rec.Took = statusOf(line), time.Since(start)
+			cfg.Log(rec)
 		}}
 	}
 	splice(stream, src, up, down)

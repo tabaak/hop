@@ -24,6 +24,7 @@ hop http <port> [flags]
 | `--local-host <ip>`   | `127.0.0.1`                                |
 | `--host-header <v>`   | `preserve`; or `rewrite`, or a literal value |
 | `--quiet`             | off; suppresses the request log            |
+| `--no-color`          | off; also honours `NO_COLOR`               |
 | `--no-tls`            | off; local development only                |
 
 Put the server and token in your shell profile once, and the everyday
@@ -64,14 +65,28 @@ hop http 3000 --host-header app.internal
 hop http 3000 --quiet
 ```
 
-Requests are logged live to stderr as they complete:
+Requests are logged live to stderr as they complete, with the calling device
+worked out from the User-Agent:
 
 ```
-  GET    200     12ms  /api/users
-  POST   201      4ms  /api/users
-  GET    404    0.8ms  /favicon.ico
-  GET    101      2ms  /ws
+  GET    200      5ms  iPhone Safari   /probe.txt
+  GET    200      1ms  Mac Chrome      /
+  GET    404      1ms  curl            /nope
+  POST   201      4ms  Mac Chrome      /submit
+  DELETE 204      2ms  Android Chrome  /item/7
+  GET    101      2ms  Mac Safari      /ws
 ```
+
+Method and status are colourised — green for `GET` and 2xx, blue for `POST`,
+yellow for `PUT`/`PATCH` and 4xx, red for `DELETE` and 5xx, magenta for a 101
+upgrade — so a failing request is findable without reading. Colour is emitted
+only when stderr is a terminal, so redirecting to a file or piping into `grep`
+gives plain text. `NO_COLOR` and `--no-color` both turn it off.
+
+The device column is a **guess**. User-Agent strings imitate each other
+relentlessly — Chrome's contains "Safari", Edge's contains both — so the checks
+run most-specific first, and an unrecognised agent falls back to its leading
+token.
 
 The duration is **time to the first byte of the response**, not time to close.
 For a WebSocket or an SSE stream those differ by the whole life of the

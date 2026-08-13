@@ -101,6 +101,24 @@ func TestSetHost(t *testing.T) {
 	}
 }
 
+func TestHeaderValue(t *testing.T) {
+	head := []byte("GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: curl/8.4.0\r\nAccept: */*\r\n\r\n")
+
+	if got := headerValue(head, "user-agent"); got != "curl/8.4.0" {
+		t.Errorf("User-Agent = %q, want %q", got, "curl/8.4.0")
+	}
+	if got := headerValue(head, "accept"); got != "*/*" {
+		t.Errorf("Accept = %q, want %q", got, "*/*")
+	}
+	if got := headerValue(head, "referer"); got != "" {
+		t.Errorf("absent header = %q, want empty", got)
+	}
+	// The request line must not be mistaken for a header.
+	if got := headerValue([]byte("GET /user-agent: x HTTP/1.1\r\n\r\n"), "user-agent"); got != "" {
+		t.Errorf("matched inside the request line: %q", got)
+	}
+}
+
 func TestStatusOf(t *testing.T) {
 	cases := map[string]int{
 		"HTTP/1.1 200 OK":              200,

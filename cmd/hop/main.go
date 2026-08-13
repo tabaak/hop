@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 
 	"hop.vokh.dev/internal/client"
@@ -26,6 +25,7 @@ func main() {
 		noTLS      = fs.Bool("no-tls", false, "connect without TLS (local development only)")
 		hostHeader = fs.String("host-header", "preserve", "Host sent to the local app: preserve, rewrite, or a literal value")
 		quiet      = fs.Bool("quiet", false, "don't log requests")
+		noColour   = fs.Bool("no-color", false, "disable colour in the request log")
 	)
 	fs.Usage = usage
 
@@ -56,6 +56,7 @@ func main() {
 		HostHeader: resolveHostHeader(*hostHeader, local),
 	}
 	if !*quiet {
+		initColour(*noColour)
 		cfg.Log = logRequest
 	}
 
@@ -109,40 +110,6 @@ func resolveHostHeader(flagVal, local string) string {
 	}
 }
 
-var logMu sync.Mutex
-
-// logRequest prints one line per request. Status and duration come before the
-// target so the columns line up when paths vary in length, which is most of
-// the value of having a live log at all.
-func logRequest(method, target string, status int, took time.Duration) {
-	if method == "" {
-		method, target = "?", "?"
-	}
-	logMu.Lock()
-	defer logMu.Unlock()
-	fmt.Fprintf(os.Stderr, "  %-6s %3s %8s  %s\n", method, statusText(status), duration(took), target)
-}
-
-// statusText renders an unparseable status as "---" rather than 0, which would
-// read as a real code.
-func statusText(status int) string {
-	if status == 0 {
-		return "---"
-	}
-	return strconv.Itoa(status)
-}
-
-func duration(d time.Duration) string {
-	switch {
-	case d < time.Millisecond:
-		return fmt.Sprintf("%.1fms", float64(d)/float64(time.Millisecond))
-	case d < time.Second:
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	default:
-		return fmt.Sprintf("%.2fs", d.Seconds())
-	}
-}
-
 func usage() {
 	fmt.Fprint(os.Stderr, `hop — expose a local port through a hop server
 
@@ -157,6 +124,7 @@ flags:
   --host-header <v>  Host sent to the local app: preserve (default), rewrite,
                      or a literal value
   --quiet            don't log requests
+  --no-color         disable colour in the request log
   --no-tls           connect without TLS (local development only)
 `)
 }

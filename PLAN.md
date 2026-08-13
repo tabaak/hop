@@ -133,7 +133,11 @@ Remaining:
 
 ### M4 — Polish ✅ done
 
-- Live request log in the agent terminal, on by default, `--quiet` to silence
+- Live request log in the agent terminal, on by default, `--quiet` to silence.
+  Method and status are colourised, and each line carries the calling device
+  derived from the User-Agent — the point being to tell your phone from your
+  laptop when testing on both. Colour only when stderr is a terminal; honours
+  `NO_COLOR` and `--no-color`.
 - `--host-header preserve|rewrite|<literal>`
 - systemd: the deployed unit needs no low ports at all (Caddy owns 80/443), so
   it keeps an empty `CapabilityBoundingSet`. The standalone recipe, with

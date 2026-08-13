@@ -132,10 +132,10 @@ func TestRequestLog(t *testing.T) {
 		mu   sync.Mutex
 		logs []string
 	)
-	h := newHarnessOpts(t, harnessOpts{scheme: "http", log: func(method, target string, status int, took time.Duration) {
+	h := newHarnessOpts(t, harnessOpts{scheme: "http", log: func(r client.Request) {
 		mu.Lock()
 		defer mu.Unlock()
-		logs = append(logs, fmt.Sprintf("%s %s %d", method, target, status))
+		logs = append(logs, fmt.Sprintf("%s %s %d %s", r.Method, r.Target, r.Status, r.UserAgent))
 	}})
 
 	h.get(t, "myapp", "/hello")
@@ -164,10 +164,10 @@ func TestRequestLog(t *testing.T) {
 func TestUpgradeSurvivesTunnel(t *testing.T) {
 	var logged []string
 	var mu sync.Mutex
-	h := newHarnessOpts(t, harnessOpts{scheme: "http", log: func(method, target string, status int, took time.Duration) {
+	h := newHarnessOpts(t, harnessOpts{scheme: "http", log: func(r client.Request) {
 		mu.Lock()
 		defer mu.Unlock()
-		logged = append(logged, fmt.Sprintf("%s %s %d", method, target, status))
+		logged = append(logged, fmt.Sprintf("%s %s %d", r.Method, r.Target, r.Status))
 	}})
 
 	conn, err := net.Dial("tcp", strings.TrimPrefix(h.ingress.URL, "http://"))
@@ -250,7 +250,7 @@ type harnessOpts struct {
 	scheme      string
 	rewriteHost bool
 	hostHeader  string
-	log         func(method, target string, status int, took time.Duration)
+	log         func(client.Request)
 }
 
 func newHarness(t *testing.T, useTLS bool) *harness {

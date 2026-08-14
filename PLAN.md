@@ -173,6 +173,15 @@ and ALPN mux can be added later without touching anything else.
 **Auth is mandatory even solo.** An open tunnel service gets discovered and used
 for phishing within days. A static token file is sufficient.
 
+**`--no-tls` is refused for non-private peers rather than warned about.** The
+token is the first thing written to a new connection, so plaintext leaks it to
+anyone on the path. A confirmation prompt would be answered reflexively within
+a week and would break non-interactive callers; a check is a guarantee. It runs
+against the connected peer, not a resolved name, so a hostile resolver can't
+answer loopback for the check and something public for the dial. No override
+flag: SSH port-forwarding covers the remote-plaintext case and makes the peer
+loopback honestly.
+
 ## Environment
 
 - DNS: **Cloudflare** → `github.com/libdns/cloudflare` for the certmagic DNS-01 solver.

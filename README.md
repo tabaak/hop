@@ -25,7 +25,7 @@ hop http <port> [flags]
 | `--host-header <v>`   | `preserve`; or `rewrite`, or a literal value |
 | `--quiet`             | off; suppresses the request log            |
 | `--no-color`          | off; also honours `NO_COLOR`               |
-| `--no-tls`            | off; local development only                |
+| `--no-tls`            | off; refused unless the peer is private    |
 
 Put the server and token in your shell profile once, and the everyday
 invocation is two words:
@@ -202,6 +202,15 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
   rather than spinning.
 - **The agent verifies the server certificate** against the system roots. There
   is no skip-verify flag; the control connection carries your auth token.
+- **`--no-tls` only reaches private networks.** The agent writes its token as
+  the first thing on a new connection, so plaintext puts the credential on the
+  wire in the clear. The check runs against the *connected peer* rather than a
+  resolved name — resolving separately from dialing is a TOCTOU gap — and it
+  refuses before writing anything, so the token stays on your machine.
+  Loopback, RFC 1918, IPv6 unique-local, link-local and Tailscale's
+  `100.64.0.0/10` are permitted; everything else exits with an explanation.
+  There is no override flag: to reach a remote plaintext hopd, forward a local
+  port over SSH, which makes the peer loopback and passes naturally.
 - **The local app sees the public Host header** (`myapp.hop.vokh.dev`) unless
   you pass `--host-header`. That default is right for most apps — links and
   redirects they build point back through the tunnel — but dev servers with

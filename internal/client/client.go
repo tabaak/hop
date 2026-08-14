@@ -102,7 +102,21 @@ func Run(cfg Config) (assigned string, err error) {
 func dial(cfg Config) (net.Conn, error) {
 	netDialer := &net.Dialer{Timeout: 10 * time.Second}
 	if !cfg.TLS {
-		return netDialer.Dial("tcp", cfg.Server)
+		conn, err := netDialer.Dial("tcp", cfg.Server)
+		if err != nil {
+			return nil, err
+		}
+		// Checked on the connected socket rather than on a resolved name.
+		// Resolving separately from dialing is a time-of-check/time-of-use
+		// gap: a hostile resolver could answer 127.0.0.1 for the check and
+		// something public for the dial. Inspecting the peer we actually
+		// reached means the token cannot leave the machine unless the
+		// connection is already provably local.
+		if err := requirePrivatePeer(conn.RemoteAddr()); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		return conn, nil
 	}
 	host, _, err := net.SplitHostPort(cfg.Server)
 	if err != nil {

@@ -213,12 +213,15 @@ func (s *Store) Watch(stop <-chan struct{}, every time.Duration, onReload func(l
 			if !s.changed() {
 				continue
 			}
-			n, err := s.Reload()
-			if err != nil {
+			if _, err := s.Reload(); err != nil {
 				log.Printf("tokens: %v — keeping the previous set", err)
 				continue
 			}
-			log.Printf("tokens: reloaded %s, %d accepted", s.path, n)
+			// Len, not the file's own count, so this number means the same
+			// thing as the one logged at startup. Reporting just the file's
+			// share reads as tokens disappearing whenever HOP_TOKENS is also
+			// in play.
+			log.Printf("tokens: reloaded %s, %d accepted", s.path, s.Len())
 			if onReload != nil {
 				onReload(s.Labels())
 			}

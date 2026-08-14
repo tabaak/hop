@@ -127,8 +127,25 @@ Done: registry with generation-guarded claims, token auth, `--sub` claiming,
 reserved blocklist, random names, reconnect with backoff that re-claims the same
 name, same-token takeover, keepalive, 404 for unknown names.
 
+Tokens now come from a file (`-tokens-file`), one labelled line per device,
+polled every 5s. `hopd mint <label>` generates a token and prints the line to
+add. Only the SHA-256 is stored — plain, not bcrypt or argon2, because a
+32-byte random secret has no dictionary to attack and a KDF would buy nothing
+but handshake latency.
+
+The label, not the secret, is the identity: it names the device in the log and
+decides subdomain ownership. So rotating a token keeps the names its owner
+holds, while separate devices can't evict each other. `HOP_TOKENS` still works
+alongside the file, labelled `env-<hash prefix>` — derived from the hash rather
+than from position, since a label that shifted when the list was reordered
+would silently reassign ownership.
+
+Revoking a line **closes that device's live tunnels** rather than only refusing
+its next connection; the agent then reconnects once, is refused, and exits. A
+file that fails to parse is rejected in favour of the loaded set, so a
+truncated write costs a log line rather than every tunnel.
+
 Remaining:
-- Tokens from a file rather than a flag/env, so adding one doesn't need a restart
 - `~/.hop.yaml` client config, so `--token` isn't needed on every invocation
 
 ### M4 — Polish ✅ done
@@ -172,6 +189,18 @@ and ALPN mux can be added later without touching anything else.
 
 **Auth is mandatory even solo.** An open tunnel service gets discovered and used
 for phishing within days. A static token file is sufficient.
+
+**One token per device, keyed on a label rather than the secret.** A single
+shared token makes revocation an all-or-nothing event: you rotate, then hunt
+down every copy. Labels make it one line to delete, and make the log say which
+of your machines is connected. Keying ownership on the label rather than the
+token bytes is what lets a secret be rotated without the server treating the
+same device as a stranger and refusing it its own subdomain.
+
+**The tokens file is polled, not watched with inotify.** No dependency, and it
+survives the atomic-rename that editors and config management do — a watch
+registered on the original inode would not. Five seconds of delay is
+irrelevant for adding a device and acceptable for removing one.
 
 **`--no-tls` is refused for non-private peers rather than warned about.** The
 token is the first thing written to a new connection, so plaintext leaks it to

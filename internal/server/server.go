@@ -27,8 +27,16 @@ type Config struct {
 	PublicScheme string
 	// PublicPort is appended to agent URLs when non-empty (M1 dev only).
 	PublicPort string
-	// Tokens is the set of accepted agent tokens.
-	Tokens map[string]bool
+	// Tokens authenticates agents.
+	Tokens Authenticator
+}
+
+// Authenticator resolves an agent's token to the label that owns it. The label
+// is the identity everything downstream works in: it names the device in the
+// log, and it decides who may take over a subdomain. *tokens.Store implements
+// it.
+type Authenticator interface {
+	Lookup(secret string) (label string, ok bool)
 }
 
 type Server struct {
@@ -79,6 +87,13 @@ func (s *Server) subdomainOf(host string) string {
 	return sub
 }
 
+// RevokeExcept disconnects every agent whose owning label is no longer
+// accepted, returning the subdomains it freed. Call it after the token set
+// changes.
+func (s *Server) RevokeExcept(keep map[string]bool) []string {
+	return s.reg.CloseRevoked(keep)
+}
+
 // ServeControl runs the agent-facing listener until it errors.
 func (s *Server) ServeControl(ln net.Listener) error {
 	for {
@@ -92,17 +107,22 @@ func (s *Server) ServeControl(ln net.Listener) error {
 
 func (s *Server) handleAgent(conn net.Conn) {
 	remote := conn.RemoteAddr()
-	sub, gen, evicted, ok := s.handshake(conn)
+	c, ok := s.handshake(conn)
 	if !ok {
 		conn.Close()
 		return
 	}
+	sub, gen := c.sub, c.gen
+	// The label makes the log answer "which of my devices is this?", which is
+	// the whole reason tokens are issued per device.
+	who := fmt.Sprintf("%s (%s)", remote, c.label)
+
 	// From here the claim is ours; every exit path must release it.
 	defer s.reg.Release(sub, gen)
 
-	if evicted != nil {
-		log.Printf("agent %s: taking over %q from a previous session", remote, sub)
-		evicted.Close()
+	if c.evicted != nil {
+		log.Printf("agent %s: taking over %q from a previous session", who, sub)
+		c.evicted.Close()
 	}
 
 	// The server opens streams toward the agent, so it takes the yamux client
@@ -110,56 +130,69 @@ func (s *Server) handleAgent(conn net.Conn) {
 	// decide odd/even stream ID assignment; they must simply differ.
 	sess, err := yamux.Client(conn, tunnel.Config())
 	if err != nil {
-		log.Printf("agent %s: yamux upgrade failed: %v", remote, err)
+		log.Printf("agent %s: yamux upgrade failed: %v", who, err)
 		conn.Close()
 		return
 	}
 
 	t := NewTunnel(sub, sess, s.cfg.PublicScheme)
 	s.reg.Bind(sub, gen, t)
-	log.Printf("agent %s: tunnel up for %q (%d live)", remote, sub, s.reg.Count())
+	log.Printf("agent %s: tunnel up for %q (%d live)", who, sub, s.reg.Count())
 
 	t.Wait()
-	log.Printf("agent %s: tunnel down for %q", remote, sub)
+	log.Printf("agent %s: tunnel down for %q", who, sub)
+}
+
+// claim is a successful handshake: the name taken, the generation guarding it,
+// the label that owns it, and any predecessor the caller must close.
+type claim struct {
+	sub     string
+	label   string
+	gen     uint64
+	evicted *Tunnel
 }
 
 // handshake reads Hello, authenticates, claims a name and acks. On any failure
-// it reports the reason to the agent and returns ok=false. A non-nil evicted
-// tunnel is the caller's to close.
-func (s *Server) handshake(conn net.Conn) (sub string, gen uint64, evicted *Tunnel, ok bool) {
+// it reports the reason to the agent and returns ok=false.
+func (s *Server) handshake(conn net.Conn) (c claim, ok bool) {
 	if err := conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		return "", 0, nil, false
+		return claim{}, false
 	}
 
 	var h proto.Hello
 	if err := proto.Read(conn, &h); err != nil {
 		log.Printf("agent %s: bad hello: %v", conn.RemoteAddr(), err)
-		return "", 0, nil, false
+		return claim{}, false
 	}
-	if !s.cfg.Tokens[h.Token] {
+	label, ok := s.cfg.Tokens.Lookup(h.Token)
+	if !ok {
 		log.Printf("agent %s: rejected token", conn.RemoteAddr())
 		proto.Write(conn, proto.HelloAck{Err: "invalid token"})
-		return "", 0, nil, false
+		return claim{}, false
 	}
 
-	sub, gen, evicted, err := s.reg.Reserve(h.Subdomain, h.Token)
+	// Ownership is keyed on the label, not on the secret. Rotating a token
+	// therefore keeps the names its owner holds, and two devices with separate
+	// tokens cannot evict each other — which is the point of issuing them
+	// separately.
+	sub, gen, evicted, err := s.reg.Reserve(h.Subdomain, label)
 	if err != nil {
 		proto.Write(conn, proto.HelloAck{Err: err.Error()})
-		return "", 0, nil, false
+		return claim{}, false
 	}
 
 	ack := proto.HelloAck{Subdomain: sub, URL: s.urlFor(sub)}
 	if err := proto.Write(conn, ack); err != nil {
 		s.reg.Release(sub, gen)
-		return "", 0, nil, false
+		return claim{}, false
 	}
 
 	// Clear the handshake deadline; yamux keepalive governs the tunnel now.
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		s.reg.Release(sub, gen)
-		return "", 0, nil, false
+		return claim{}, false
 	}
-	return sub, gen, evicted, true
+	return claim{sub: sub, label: label, gen: gen, evicted: evicted}, true
 }
 
 func (s *Server) urlFor(sub string) string {

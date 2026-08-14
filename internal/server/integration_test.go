@@ -21,6 +21,7 @@ import (
 
 	"hop.vokh.dev/internal/client"
 	"hop.vokh.dev/internal/server"
+	"hop.vokh.dev/internal/tokens"
 )
 
 const testToken = "test-token"
@@ -315,7 +316,7 @@ func newHarnessOpts(t *testing.T, opts harnessOpts) *harness {
 	srv := server.New(server.Config{
 		Domain:       "localhost",
 		PublicScheme: opts.scheme,
-		Tokens:       map[string]bool{testToken: true},
+		Tokens:       tokens.New(map[string]string{tokens.Hash(testToken): "test-agent"}),
 	})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

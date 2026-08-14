@@ -11,7 +11,10 @@ Group=hop
 
 # Secrets live here, not in the command line, where `ps` would show them:
 #   CLOUDFLARE_API_TOKEN=...
-#   HOP_TOKENS=token1,token2
+#
+# Agent tokens are in /etc/hop/tokens instead (see -tokens-file below).
+# HOP_TOKENS=token1,token2 still works and is read alongside that file, which
+# is how a running deployment migrates without a flag day.
 EnvironmentFile=/etc/hop/hopd.env
 
 # This unit assumes hopd runs behind Caddy, which owns :80 and :443:
@@ -32,8 +35,15 @@ EnvironmentFile=/etc/hop/hopd.env
 # challenge works without burning production rate limit. Once the journal shows
 # "certificate ready", flip this to -staging=false, delete /var/lib/hop/certs,
 # and restart. See deploy/README.md.
+#
+#   -tokens-file  one `label sha256:hash` line per device, re-read within
+#                 seconds of a change. Adding or revoking a device therefore
+#                 needs no restart, and revoking disconnects that device
+#                 rather than only refusing its next connection. Create it
+#                 with `hopd mint <label>`; mode 640, group hop.
 ExecStart=/usr/local/bin/hopd \
     -domain hop.vokh.dev \
+    -tokens-file /etc/hop/tokens \
     -email viktorr200830@gmail.com \
     -staging=true \
     -cert-dir /var/lib/hop/certs \

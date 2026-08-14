@@ -27,8 +27,12 @@ var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 // entry is one claimed name. tunnel is nil between Reserve and Bind.
 type entry struct {
 	tunnel *Tunnel
-	token  string
-	gen    uint64
+	// owner is the token's label, not the token itself. Holding the secret in
+	// server memory for the life of every tunnel bought nothing, and the label
+	// is the more useful identity anyway: it survives a rotation of the secret
+	// behind it.
+	owner string
+	gen   uint64
 }
 
 // Registry maps a subdomain to its live tunnel.
@@ -52,13 +56,15 @@ func NewRegistry() *Registry {
 	return &Registry{entries: make(map[string]*entry)}
 }
 
-// Reserve claims want for token, or allocates a random name if want is empty.
+// Reserve claims want for owner, or allocates a random name if want is empty.
+// owner is a token label, so every device holding the same label is the same
+// owner and separate labels are separate owners.
 //
-// If want is held by a tunnel belonging to the same token, that tunnel is
+// If want is held by a tunnel belonging to the same owner, that tunnel is
 // evicted and returned so the caller can close it. This is the reconnect path:
 // after a dropped connection the server may not have reaped the dead session
 // yet, and the owner shouldn't have to wait ~45s for keepalive to notice.
-func (r *Registry) Reserve(want, token string) (sub string, gen uint64, evicted *Tunnel, err error) {
+func (r *Registry) Reserve(want, owner string) (sub string, gen uint64, evicted *Tunnel, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -81,7 +87,7 @@ func (r *Registry) Reserve(want, token string) (sub string, gen uint64, evicted 
 			return "", 0, nil, ErrTaken
 		}
 		if e, exists := r.entries[want]; exists {
-			if e.tunnel == nil || e.token != token {
+			if e.tunnel == nil || e.owner != owner {
 				return "", 0, nil, ErrTaken
 			}
 			evicted = e.tunnel
@@ -89,7 +95,7 @@ func (r *Registry) Reserve(want, token string) (sub string, gen uint64, evicted 
 	}
 
 	r.nextGen++
-	r.entries[want] = &entry{token: token, gen: r.nextGen}
+	r.entries[want] = &entry{owner: owner, gen: r.nextGen}
 	return want, r.nextGen, evicted, nil
 }
 
@@ -121,6 +127,40 @@ func (r *Registry) Lookup(sub string) (*Tunnel, bool) {
 		return nil, false
 	}
 	return e.tunnel, true
+}
+
+// CloseRevoked drops every live tunnel whose owner is absent from keep, and
+// returns the names it closed.
+//
+// This is what makes deleting a line from the tokens file mean something. A
+// revocation that only stopped *future* connections would leave a stolen
+// credential serving traffic for as long as its holder cared to keep the
+// socket open, which is the opposite of what you want in the minute after
+// discovering it leaked.
+//
+// Rotation is deliberately not affected: a new secret under the same label is
+// the same owner, so that tunnel stays up.
+func (r *Registry) CloseRevoked(keep map[string]bool) []string {
+	r.mu.RLock()
+	var (
+		doomed []*Tunnel
+		names  []string
+	)
+	for sub, e := range r.entries {
+		if e.tunnel != nil && !keep[e.owner] {
+			doomed = append(doomed, e.tunnel)
+			names = append(names, sub)
+		}
+	}
+	r.mu.RUnlock()
+
+	// Closed outside the lock. Each close wakes the goroutine serving that
+	// tunnel, which takes the write lock to release its claim on the way out —
+	// holding the read lock here would deadlock against it.
+	for _, t := range doomed {
+		t.Close()
+	}
+	return names
 }
 
 // Count returns the number of live tunnels.

@@ -21,9 +21,22 @@ import (
 
 	"hop.vokh.dev/internal/certs"
 	"hop.vokh.dev/internal/server"
+	"hop.vokh.dev/internal/tokens"
 )
 
+// tokenPoll is how often the tokens file is checked for changes. Adding a
+// device tolerates a few seconds; revoking one is the case that matters, and
+// this bounds how long a stolen token keeps working after you delete its line.
+const tokenPoll = 5 * time.Second
+
 func main() {
+	// One subcommand, handled before flag parsing since it shares none of the
+	// server's flags.
+	if len(os.Args) > 1 && os.Args[1] == "mint" {
+		mint(os.Args[2:])
+		return
+	}
+
 	var (
 		ingressAddr  = flag.String("ingress", ":443", "public ingress address")
 		redirectAddr = flag.String("redirect", ":80", "address serving the HTTP-to-HTTPS redirect; empty to disable")
@@ -33,6 +46,7 @@ func main() {
 		scheme       = flag.String("scheme", "", "scheme for agent-facing URLs (default: https when -ingress-tls, else http)")
 		domain       = flag.String("domain", "hop.vokh.dev", "zone tunnels live under")
 		publicPort   = flag.String("public-port", "", "port appended to agent-facing URLs; empty for the scheme default")
+		tokensFile   = flag.String("tokens-file", "", "file of `label sha256:hash` lines, reloaded when it changes")
 		tokensFlag   = flag.String("tokens", "", "comma-separated agent tokens (or set HOP_TOKENS)")
 		email        = flag.String("email", "", "ACME account email for expiry notices")
 		staging      = flag.Bool("staging", true, "use the Let's Encrypt staging CA; set false for real certificates")
@@ -40,10 +54,14 @@ func main() {
 	)
 	flag.Parse()
 
-	tokens := parseTokens(*tokensFlag)
-	if len(tokens) == 0 {
-		log.Fatal("no tokens configured: pass -tokens or set HOP_TOKENS")
+	store, err := tokens.Open(*tokensFile, envTokens(*tokensFlag))
+	if err != nil {
+		log.Fatalf("tokens: %v", err)
 	}
+	if store.Len() == 0 {
+		log.Fatal("no tokens configured: pass -tokens-file or -tokens, or set HOP_TOKENS")
+	}
+	log.Printf("%d token(s) accepted", store.Len())
 
 	if *scheme == "" {
 		*scheme = "http"
@@ -56,7 +74,15 @@ func main() {
 		Domain:       *domain,
 		PublicScheme: *scheme,
 		PublicPort:   *publicPort,
-		Tokens:       tokens,
+		Tokens:       store,
+	})
+
+	// A nil stop channel never fires, so the watcher lives as long as the
+	// process — which is exactly as long as it is wanted.
+	go store.Watch(nil, tokenPoll, func(labels map[string]bool) {
+		if freed := srv.RevokeExcept(labels); len(freed) > 0 {
+			log.Printf("tokens: revoked credential, disconnected %v", freed)
+		}
 	})
 
 	// One certificate covers both listeners. The wildcard is only worth
@@ -164,18 +190,28 @@ func redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusMovedPermanently)
 }
 
-// parseTokens reads tokens from the flag, falling back to HOP_TOKENS so the
-// systemd unit can keep them out of the process arguments.
-func parseTokens(flagVal string) map[string]bool {
+// envTokens reads tokens from the flag, falling back to HOP_TOKENS so the
+// systemd unit can keep them out of the process arguments. It predates
+// -tokens-file and is kept so an existing deployment keeps working while its
+// tokens are migrated one at a time.
+//
+// These carry no operator-chosen label, so they get one derived from the hash.
+// A positional label ("env-1") would shuffle whenever the list was reordered,
+// and the label decides subdomain ownership — it has to be stable. The prefix
+// also matches what `hopd mint` prints, which makes migrating a token a matter
+// of recognising it.
+func envTokens(flagVal string) map[string]string {
 	raw := flagVal
 	if raw == "" {
 		raw = os.Getenv("HOP_TOKENS")
 	}
-	tokens := make(map[string]bool)
+	out := make(map[string]string)
 	for _, t := range strings.Split(raw, ",") {
-		if t = strings.TrimSpace(t); t != "" {
-			tokens[t] = true
+		if t = strings.TrimSpace(t); t == "" {
+			continue
 		}
+		h := tokens.Hash(t)
+		out[h] = "env-" + h[:8]
 	}
-	return tokens
+	return out
 }

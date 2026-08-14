@@ -101,7 +101,8 @@ names are reserved (`www`, `api`, `admin`, `app`, `mail`, `hop`, …).
 ## hopd — the server
 
 Standard Go flags, so `-domain` and `--domain` are equivalent. Tokens come from
-`-tokens` or `HOP_TOKENS`; with neither, it refuses to start.
+`-tokens-file`, `-tokens` or `HOP_TOKENS`; with none of them, it refuses to
+start.
 
 | Flag            | Default               |                                              |
 |-----------------|-----------------------|----------------------------------------------|
@@ -113,7 +114,8 @@ Standard Go flags, so `-domain` and `--domain` are equivalent. Tokens come from
 | `-control-tls`  | `true`                | terminate TLS on the control listener        |
 | `-scheme`       | auto                  | `https` if `-ingress-tls`, else `http`       |
 | `-public-port`  | empty                 | port appended to agent-facing URLs           |
-| `-tokens`       | `$HOP_TOKENS`         | comma-separated                              |
+| `-tokens-file`  | empty                 | labelled token hashes, reloaded when changed |
+| `-tokens`       | `$HOP_TOKENS`         | comma-separated, unlabelled                  |
 | `-email`        | empty                 | ACME account, for expiry notices             |
 | `-staging`      | `true`                | staging CA; `false` for real certificates    |
 | `-cert-dir`     | `/var/lib/hop/certs`  | ACME account key and certificates            |
@@ -143,6 +145,75 @@ production you drive it through systemd rather than by hand:
 sudo systemctl restart hopd
 sudo journalctl -u hopd -f
 ```
+
+### Tokens
+
+One token per device, in a file hopd re-reads whenever it changes:
+
+```
+# /etc/hop/tokens
+laptop  sha256:260404a88f965b027ccaf72644869dfc0da6f36303bef89fbb5273ed19fc46ad
+phone   sha256:00644a2931730760559c0be984bf4f8fedff582a3c9d2ff09cd34bf6dfda637b
+ci      sha256:9f2b1c4d...
+```
+
+`hopd mint <label>` generates one and prints both halves — the token, which
+goes to the device, and the line, which goes in the file:
+
+```sh
+hopd mint laptop
+```
+
+Only the hash is stored, so the file is safe to back up and a leaked copy
+yields nothing usable. The price is that hopd can never show you a token again:
+it is displayed once, at mint time, and a lost one is replaced rather than
+recovered.
+
+Plain SHA-256 is deliberate rather than an oversight. bcrypt and argon2 exist to
+make *guessable* secrets expensive to attack; a 32-byte random token has no
+dictionary to run against it, so a password KDF would add latency to every
+handshake and nothing else.
+
+**Adding or revoking a device needs no restart.** The file is polled every five
+seconds:
+
+```sh
+# add — append the line hopd mint printed
+echo 'phone  sha256:...' | sudo tee -a /etc/hop/tokens
+
+# revoke — delete that device's line
+sudo sed -i '/^phone /d' /etc/hop/tokens
+```
+
+Revoking **disconnects the device immediately** rather than only blocking its
+next connection. An agent already holding a tunnel on a deleted credential is
+closed within the poll interval, tries once to reconnect, and exits with
+`tunnel refused: invalid token`. A revocation that let a stolen token keep
+serving traffic for as long as its holder kept the socket open would not be
+worth much.
+
+The label is the identity everything else works in. It names the device in the
+log:
+
+```
+agent 46.63.126.216:45174 (laptop): tunnel up for "myapp" (2 live)
+```
+
+and it decides who may take over a subdomain. Two devices with separate tokens
+cannot evict each other's names — which is the point of issuing them
+separately — while rotating the secret under an existing label keeps the names
+that label holds.
+
+A file that fails to parse is **rejected in favour of the set already loaded**,
+and complained about once per edit. A truncated write mid-`vim` therefore costs
+a log line rather than every live tunnel. The same protection is why an empty
+file is refused: it is nearly always an accident, and to deny every agent at
+once you stop the service.
+
+`-tokens` and `HOP_TOKENS` still work, unchanged, so an existing deployment
+keeps running while its tokens migrate. They carry no label, so hopd derives
+one from the hash — `env-260404a8` — which is stable across restarts and
+matches the beginning of the hash `hopd mint` prints.
 
 ## Local development
 
@@ -192,10 +263,10 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
 - **Staging is the default.** `-staging=false` gets real certificates. Let's
   Encrypt's production rate limits are easy to burn while you're still getting
   the DNS token right.
-- **One agent per subdomain.** A second agent presenting the *same token* takes
+- **One agent per subdomain.** A second agent under the *same token label* takes
   over the name — that's the reconnect path, so a dropped connection doesn't
   cost you your URL for the ~45s it takes keepalive to reap the dead session. A
-  different token is refused.
+  different label is refused.
 - **Reconnects keep their URL.** The agent remembers the assigned name and asks
   for it again, so a server-assigned `brave-otter` stays `brave-otter`.
 - **Refusals are terminal.** A bad token or a name someone else holds exits
@@ -228,8 +299,9 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
 
 - **One tunnel per process.** Two ports means two terminals.
 - **HTTP only.** No raw TCP, so no tunnelling Postgres or SSH.
-- **The token must be in the environment or on the command line.** A
-  `~/.hop.yaml` config is an open M3 item.
+- **The agent's token must be in the environment or on the command line.** The
+  server side now has a proper token file; the client side still means
+  `HOP_TOKEN` in your shell profile. A `~/.hop.yaml` is the open M3 item.
 - **hopd's own server-side log reports 200 for upgraded connections.** The
   agent-side log gets this right; the server's status recorder doesn't see the
   101 because ReverseProxy hijacks the connection.

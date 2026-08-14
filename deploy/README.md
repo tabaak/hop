@@ -67,14 +67,42 @@ chmod 755 /usr/local/bin/hopd
 mkdir -p /etc/hop
 cat > /etc/hop/hopd.env <<'EOF'
 CLOUDFLARE_API_TOKEN=<the scoped token from step 2>
-HOP_TOKENS=<a long random string>
 EOF
 chmod 600 /etc/hop/hopd.env
 ```
 
-Generate the agent token with something like `openssl rand -hex 32`. Anyone
-holding it can open tunnels on your domain, so treat it as a password.
-`HOP_TOKENS` is comma-separated if you want more than one.
+Agent tokens go in their own file, one per device:
+
+```sh
+hopd mint laptop
+```
+
+That prints the token — which goes to the device — and the line to add here:
+
+```sh
+touch /etc/hop/tokens
+chown root:hop /etc/hop/tokens
+chmod 640 /etc/hop/tokens
+$EDITOR /etc/hop/tokens
+```
+
+```
+# /etc/hop/tokens
+laptop  sha256:260404a88f965b027ccaf72644869dfc0da6f36303bef89fbb5273ed19fc46ad
+```
+
+Only the hash is stored, so this file is safe to back up, and the token itself
+is shown once and never again. Anyone holding a token can open tunnels on your
+domain, so treat it as a password.
+
+hopd re-reads the file within five seconds of a change, so **adding or revoking
+a device needs no restart** — and revoking disconnects that device immediately
+rather than merely blocking its next attempt. Mode `640` with group `hop` is
+what lets the service read it while `ProtectSystem=strict` keeps it read-only.
+
+`HOP_TOKENS` in the env file still works and takes effect alongside the file,
+which is how an already-running deployment migrates: add the file, move tokens
+into it one at a time, then drop `HOP_TOKENS` and restart once at the end.
 
 ## 4b. Behind an existing Caddy
 

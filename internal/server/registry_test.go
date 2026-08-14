@@ -2,8 +2,35 @@ package server
 
 import (
 	"errors"
+	"net"
 	"testing"
+
+	"github.com/hashicorp/yamux"
+
+	"hop.vokh.dev/internal/tunnel"
 )
+
+// liveTunnel returns a Tunnel with a real session behind it, over an in-memory
+// pipe. Most tests here only compare tunnel pointers and can use a bare
+// &Tunnel{}; anything that closes one needs a session to close.
+func liveTunnel(t *testing.T, sub string) *Tunnel {
+	t.Helper()
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+
+	sess, err := yamux.Client(a, tunnel.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The far end, standing in for the agent.
+	peer, err := yamux.Server(b, tunnel.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { peer.Close() })
+
+	return NewTunnel(sub, sess, "https")
+}
 
 func TestReserveRejectsBadAndReservedNames(t *testing.T) {
 	r := NewRegistry()
@@ -11,38 +38,38 @@ func TestReserveRejectsBadAndReservedNames(t *testing.T) {
 		if name == "" {
 			continue // empty means "assign one", covered elsewhere
 		}
-		if _, _, _, err := r.Reserve(name, "tok"); err == nil && name != "x" {
+		if _, _, _, err := r.Reserve(name, "laptop"); err == nil && name != "x" {
 			t.Errorf("Reserve(%q) = nil error, want rejection", name)
 		}
 	}
-	if _, _, _, err := r.Reserve("admin", "tok"); !errors.Is(err, ErrTaken) {
+	if _, _, _, err := r.Reserve("admin", "laptop"); !errors.Is(err, ErrTaken) {
 		t.Errorf("Reserve(admin) err = %v, want ErrTaken", err)
 	}
 }
 
-func TestReserveIsExclusiveAcrossTokens(t *testing.T) {
+func TestReserveIsExclusiveAcrossOwners(t *testing.T) {
 	r := NewRegistry()
-	sub, gen, _, err := r.Reserve("myapp", "tok-a")
+	sub, gen, _, err := r.Reserve("myapp", "laptop")
 	if err != nil {
 		t.Fatalf("first Reserve: %v", err)
 	}
 	r.Bind(sub, gen, &Tunnel{Sub: sub})
 
-	if _, _, _, err := r.Reserve("myapp", "tok-b"); !errors.Is(err, ErrTaken) {
-		t.Fatalf("cross-token Reserve err = %v, want ErrTaken", err)
+	if _, _, _, err := r.Reserve("myapp", "phone"); !errors.Is(err, ErrTaken) {
+		t.Fatalf("cross-owner Reserve err = %v, want ErrTaken", err)
 	}
 }
 
 func TestReserveEvictsOwnSessionOnReconnect(t *testing.T) {
 	r := NewRegistry()
-	sub, gen, _, err := r.Reserve("myapp", "tok")
+	sub, gen, _, err := r.Reserve("myapp", "laptop")
 	if err != nil {
 		t.Fatalf("first Reserve: %v", err)
 	}
 	first := &Tunnel{Sub: sub}
 	r.Bind(sub, gen, first)
 
-	_, gen2, evicted, err := r.Reserve("myapp", "tok")
+	_, gen2, evicted, err := r.Reserve("myapp", "laptop")
 	if err != nil {
 		t.Fatalf("reconnect Reserve: %v", err)
 	}
@@ -62,10 +89,10 @@ func TestReserveEvictsOwnSessionOnReconnect(t *testing.T) {
 // not delete the successor's claim.
 func TestReleaseByEvictedPredecessorIsNoop(t *testing.T) {
 	r := NewRegistry()
-	sub, gen1, _, _ := r.Reserve("myapp", "tok")
+	sub, gen1, _, _ := r.Reserve("myapp", "laptop")
 	r.Bind(sub, gen1, &Tunnel{Sub: sub})
 
-	_, gen2, _, _ := r.Reserve("myapp", "tok")
+	_, gen2, _, _ := r.Reserve("myapp", "laptop")
 	successor := &Tunnel{Sub: sub}
 	r.Bind(sub, gen2, successor)
 
@@ -79,7 +106,7 @@ func TestReleaseByEvictedPredecessorIsNoop(t *testing.T) {
 
 func TestReleaseFreesTheName(t *testing.T) {
 	r := NewRegistry()
-	sub, gen, _, _ := r.Reserve("myapp", "tok")
+	sub, gen, _, _ := r.Reserve("myapp", "laptop")
 	r.Bind(sub, gen, &Tunnel{Sub: sub})
 	r.Release(sub, gen)
 
@@ -95,7 +122,7 @@ func TestReserveEmptyAssignsDistinctNames(t *testing.T) {
 	r := NewRegistry()
 	seen := map[string]bool{}
 	for i := 0; i < 20; i++ {
-		sub, gen, _, err := r.Reserve("", "tok")
+		sub, gen, _, err := r.Reserve("", "laptop")
 		if err != nil {
 			t.Fatalf("Reserve(\"\"): %v", err)
 		}
@@ -112,8 +139,43 @@ func TestReserveEmptyAssignsDistinctNames(t *testing.T) {
 
 func TestCountIgnoresUnboundClaims(t *testing.T) {
 	r := NewRegistry()
-	r.Reserve("pending", "tok")
+	r.Reserve("pending", "laptop")
 	if got := r.Count(); got != 0 {
 		t.Errorf("Count() = %d, want 0 for an unbound claim", got)
+	}
+}
+
+func TestCloseRevokedDropsOnlyRevokedOwners(t *testing.T) {
+	r := NewRegistry()
+
+	// Two devices, two names. Only one device's credential is revoked.
+	mine, gen1, _, _ := r.Reserve("mine", "laptop")
+	r.Bind(mine, gen1, liveTunnel(t, mine))
+	theirs, gen2, _, _ := r.Reserve("theirs", "phone")
+	r.Bind(theirs, gen2, liveTunnel(t, theirs))
+
+	// A name reserved but not yet bound has no session to close, and must not
+	// be reported as one.
+	r.Reserve("pending", "laptop")
+
+	closed := r.CloseRevoked(map[string]bool{"phone": true})
+
+	if len(closed) != 1 || closed[0] != "mine" {
+		t.Fatalf("CloseRevoked closed %v, want [mine]", closed)
+	}
+}
+
+func TestCloseRevokedKeepsEveryoneWhenNothingChanged(t *testing.T) {
+	r := NewRegistry()
+	sub, gen, _, _ := r.Reserve("myapp", "laptop")
+	r.Bind(sub, gen, liveTunnel(t, sub))
+
+	// Rotating a secret under the same label reloads the file but must not
+	// disturb the tunnel that label is holding.
+	if closed := r.CloseRevoked(map[string]bool{"laptop": true}); len(closed) != 0 {
+		t.Fatalf("CloseRevoked closed %v on an unchanged owner set", closed)
+	}
+	if _, ok := r.Lookup("myapp"); !ok {
+		t.Error("tunnel went away despite its owner still being accepted")
 	}
 }

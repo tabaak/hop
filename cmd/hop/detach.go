@@ -24,6 +24,11 @@ const detachEnv = "HOP_DETACHED"
 // the server's ack — but bounded, so a hung dial doesn't hang the terminal.
 const detachTimeout = 30 * time.Second
 
+// logRetention is how long the log of a finished agent is kept. Long enough to
+// come back on Monday and read why Friday's tunnel died; short enough that the
+// directory doesn't accumulate for the life of the machine.
+const logRetention = 14 * 24 * time.Hour
+
 // spawnDetached re-executes this binary in its own session and returns once the
 // child has a tunnel, so the shell prompt comes back with the URL already
 // printed and a failed handshake is still reported as a failure. Starting the
@@ -37,6 +42,10 @@ func spawnDetached() {
 	if err != nil {
 		fatal("%v", err)
 	}
+	// Nothing else ever removes these, and every detached start leaves one.
+	// Done here rather than on a timer because this is the only moment the tool
+	// knows it is about to add to the pile.
+	pruneLogs(logRetention)
 
 	// The log is named for the child's PID, which doesn't exist until it does.
 	// Opened under a temporary name and renamed after the fork: the child's
@@ -83,10 +92,10 @@ func spawnDetached() {
 	}
 
 	fmt.Printf("\n  %s  →  http://%s\n\n", s.URL, s.Local)
-	fmt.Printf("  detached, pid %d. %s to stop it, %s for the request log.\n\n",
+	fmt.Printf("  detached, pid %d. %s for the request log, %s to end it.\n\n",
 		pid,
+		paint("hop log "+s.Subdomain, cyan),
 		paint("hop stop "+s.Subdomain, cyan),
-		paint(shortenHome(logPath), dim),
 	)
 }
 

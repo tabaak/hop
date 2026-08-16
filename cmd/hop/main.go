@@ -12,7 +12,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -34,6 +33,8 @@ func main() {
 		runPS(args[1:])
 	case "stop":
 		runStop(args[1:])
+	case "log", "logs":
+		runLog(args[1:])
 	default:
 		usage()
 		os.Exit(2)
@@ -60,16 +61,16 @@ func runHTTP(args []string) {
 	fs.BoolVar(&detach, "detach", false, "run in the background")
 	fs.Usage = usage
 
-	if len(args) == 0 {
+	ports := parseFlags(fs, args)
+	if len(ports) != 1 {
 		usage()
 		os.Exit(2)
 	}
-	port, err := strconv.Atoi(args[0])
+	port, err := strconv.Atoi(ports[0])
 	if err != nil || port < 1 || port > 65535 {
-		fmt.Fprintf(os.Stderr, "hop: %q is not a valid port\n", args[0])
+		fmt.Fprintf(os.Stderr, "hop: %q is not a valid port\n", ports[0])
 		os.Exit(2)
 	}
-	fs.Parse(args[1:])
 
 	if *token == "" {
 		fmt.Fprintln(os.Stderr, "hop: no token; pass --token or set HOP_TOKEN")
@@ -109,8 +110,10 @@ func runHTTP(args []string) {
 		Started:  time.Now(),
 	}
 	if detached {
-		if dir, err := subDir("log"); err == nil {
-			state.Log = filepath.Join(dir, strconv.Itoa(os.Getpid())+".log")
+		// Recorded so `hop log <name>` can find it without recomputing the
+		// path from a PID it would have to trust.
+		if path, err := logPathFor(os.Getpid()); err == nil {
+			state.Log = path
 		}
 	}
 	sf, err := holdState(state)
@@ -215,6 +218,7 @@ usage:
   hop ps [flags]            list the tunnels currently up (also: ls, status)
   hop stop <name>...        stop a tunnel running on this machine
   hop stop --all            stop all of them
+  hop log <name> [-f]       show a detached tunnel's output (also: logs)
 
 http flags:
   --sub <name>       requested subdomain (default: server picks one)
@@ -230,11 +234,35 @@ ps flags:
 stop flags:
   -a, --all          stop every tunnel on this machine
 
+log flags:
+  -n <count>         how many lines to show (default 50)
+  -f, --follow       keep printing as the agent writes
+
 common flags:
   --server <addr>    control address (default $HOP_SERVER or hop.vokh.dev:7443)
   --token <token>    agent token (default $HOP_TOKEN)
   --no-tls           connect without TLS (local development only)
 `)
+}
+
+// parseFlags parses args and returns the positional ones, allowing flags on
+// either side of them.
+//
+// Go's flag package stops at the first word that isn't a flag, so `hop log
+// myapp -n 2` would silently ignore -n — the kind of thing that looks like the
+// flag not working. Parsing repeatedly, peeling off one positional each time,
+// accepts both orders without hand-rolling a parser.
+func parseFlags(fs *flag.FlagSet, args []string) []string {
+	var positional []string
+	for {
+		fs.Parse(args)
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
 }
 
 func envOr(key, fallback string) string {

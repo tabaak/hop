@@ -29,7 +29,7 @@ func runStop(args []string) {
 	fs.BoolVar(&all, "all", false, "stop every tunnel on this machine")
 	noColour := fs.Bool("no-color", false, "disable colour")
 	fs.Usage = usage
-	fs.Parse(args)
+	names := parseFlags(fs, args)
 
 	initColourOn(os.Stdout, *noColour)
 
@@ -37,8 +37,6 @@ func runStop(args []string) {
 	if err != nil {
 		fatal("%v", err)
 	}
-	names := fs.Args()
-
 	switch {
 	case all && len(names) > 0:
 		fmt.Fprintln(os.Stderr, "hop: give either --all or a name, not both")

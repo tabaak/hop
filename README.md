@@ -16,6 +16,7 @@ Three subcommands. Anything else prints usage and exits 2.
 hop http <port> [flags]   # open a tunnel
 hop ps [flags]            # list the tunnels currently up (aliases: ls, status)
 hop stop <name>...        # stop tunnels running on this machine
+hop log <name>            # read a detached tunnel's output (alias: logs)
 ```
 
 | Flag                  | Default                                    | Applies to |
@@ -27,6 +28,8 @@ hop stop <name>...        # stop tunnels running on this machine
 | `--quiet`             | off; suppresses the request log            | `http`     |
 | `--json`              | off; prints the listing as JSON            | `ps`       |
 | `-a`, `--all`         | off; stops every tunnel on this machine    | `stop`     |
+| `-n <count>`          | `50`; lines of log to show                 | `log`      |
+| `-f`, `--follow`      | off; keeps printing as the agent writes    | `log`      |
 | `--server <host:port>`| `$HOP_SERVER`, else `hop.vokh.dev:7443`    | `http`, `ps` |
 | `--token <token>`     | `$HOP_TOKEN`                               | `http`, `ps` |
 | `--no-color`          | off; also honours `NO_COLOR`               | all        |
@@ -124,8 +127,40 @@ detached agent doesn't retry, for the same reason: at startup someone is waiting
 to hear whether this worked. After it has been up, it reconnects with the usual
 backoff and survives a server restart.
 
-The request log goes to `~/.hop/log/<pid>.log`, so `tail -f` still shows traffic.
 Closing the terminal doesn't take the tunnel with it.
+
+### Reading a detached tunnel's log
+
+```sh
+hop log myapp          # last 50 lines
+hop log myapp -n 200   # more
+hop log myapp -f       # and keep watching
+```
+
+```
+  GET    200      1ms  Mac Chrome      /
+  GET    404      3ms  curl            /nope
+```
+
+The request log of a detached agent goes to `~/.hop/log/<pid>.log`; `hop log`
+finds the right file from the name. Flags work on either side of the name.
+
+**The file on disk is plain text and the colour is re-applied when you read
+it.** A detached agent writes to a file, so it correctly emits no escape codes —
+which would otherwise corrupt the log for `grep`, an editor, or anything else
+that reads it. `hop log` knows where *its* output is going, so it colours the
+method and status there, and stays plain when piped or when `NO_COLOR` is set.
+
+Two cases it answers rather than failing vaguely:
+
+- a **foreground** tunnel has no log file, and it says so — its output is in the
+  terminal that started it
+- an agent that has **exited** keeps its log, so `hop log <pid>` still works
+  afterwards, which is when you most want to read one. `hop log` with no
+  argument lists what's available.
+
+Logs of finished agents are deleted after two weeks, pruned whenever a new
+detached tunnel starts. Nothing else would ever remove them.
 
 ### Stopping tunnels
 

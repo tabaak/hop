@@ -154,7 +154,8 @@ truncated write costs a log line rather than every tunnel.
 with `--json` for scripting. Once tunnels can come from several devices, no
 single agent knows the answer, so it has to come from the server.
 
-`hop http <port> -d` detaches, and `hop stop <name>` / `--all` ends tunnels
+`hop http <port> -d` detaches, `hop log <name>` (with `-f`) reads what a
+detached agent has been doing, and `hop stop <name>` / `--all` ends tunnels
 running on this machine. The prompt comes back only once the tunnel is up, so a
 refused token is still an error in the terminal rather than a background process
 that quietly died.

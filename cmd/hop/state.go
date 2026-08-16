@@ -64,6 +64,55 @@ func subDir(name string) (string, error) {
 
 func statePath(dir string, pid int) string { return filepath.Join(dir, strconv.Itoa(pid)+".json") }
 
+// logPathFor is where a detached agent's output goes. Named for the PID
+// because that is the only handle that exists at the moment the file has to be
+// opened — the tunnel has no name until the server has answered.
+func logPathFor(pid int) (string, error) {
+	dir, err := subDir("log")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, strconv.Itoa(pid)+".log"), nil
+}
+
+// pruneLogs deletes the logs of agents that are no longer running and haven't
+// been touched in maxAge. Without it the directory grows for the life of the
+// machine: every detached start leaves a file, and nothing else ever removes
+// one. Logs of live agents are kept whatever their age.
+func pruneLogs(maxAge time.Duration) {
+	dir, err := subDir("log")
+	if err != nil {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	alive := make(map[int]bool)
+	live, _ := liveStates()
+	for _, s := range live {
+		alive[s.PID] = true
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSuffix(name, ".log"))
+		if err != nil || alive[pid] {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		os.Remove(filepath.Join(dir, name))
+	}
+}
+
 // stateFile is a held claim on ~/.hop/run/<pid>.json. The lock lives on the
 // open file, so it must stay open for the life of the agent.
 type stateFile struct {

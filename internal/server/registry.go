@@ -4,7 +4,9 @@ import (
 	"errors"
 	"math/rand"
 	"regexp"
+	"sort"
 	"sync"
+	"time"
 )
 
 var (
@@ -33,6 +35,10 @@ type entry struct {
 	// behind it.
 	owner string
 	gen   uint64
+	// since is when the tunnel bound, not when the name was reserved. A claim
+	// that never binds has no uptime to report, and a reconnect that takes the
+	// name over starts its own clock.
+	since time.Time
 }
 
 // Registry maps a subdomain to its live tunnel.
@@ -105,6 +111,7 @@ func (r *Registry) Bind(sub string, gen uint64, t *Tunnel) {
 	defer r.mu.Unlock()
 	if e, ok := r.entries[sub]; ok && e.gen == gen {
 		e.tunnel = t
+		e.since = time.Now()
 	}
 }
 
@@ -161,6 +168,37 @@ func (r *Registry) CloseRevoked(keep map[string]bool) []string {
 		t.Close()
 	}
 	return names
+}
+
+// Live is one serving tunnel, as reported to `hop ps`.
+type Live struct {
+	Sub   string
+	Owner string
+	Local string
+	Since time.Time
+}
+
+// Snapshot lists every tunnel currently serving, sorted by name.
+//
+// Reserved-but-unbound claims are left out, matching Lookup: a name that
+// nothing can be routed to yet would be a confusing thing to see in a list of
+// what is up.
+//
+// Sorted here rather than at the caller so the order is stable across calls —
+// map iteration would reshuffle the table on every invocation and make a
+// changed row hard to spot.
+func (r *Registry) Snapshot() []Live {
+	r.mu.RLock()
+	out := make([]Live, 0, len(r.entries))
+	for sub, e := range r.entries {
+		if e.tunnel != nil {
+			out = append(out, Live{Sub: sub, Owner: e.owner, Local: e.tunnel.Local, Since: e.since})
+		}
+	}
+	r.mu.RUnlock()
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Sub < out[j].Sub })
+	return out
 }
 
 // Count returns the number of live tunnels.

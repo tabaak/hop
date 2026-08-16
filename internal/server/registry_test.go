@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/yamux"
 
@@ -29,7 +30,7 @@ func liveTunnel(t *testing.T, sub string) *Tunnel {
 	}
 	t.Cleanup(func() { peer.Close() })
 
-	return NewTunnel(sub, sess, "https")
+	return NewTunnel(sub, "127.0.0.1:3000", sess, "https")
 }
 
 func TestReserveRejectsBadAndReservedNames(t *testing.T) {
@@ -177,5 +178,69 @@ func TestCloseRevokedKeepsEveryoneWhenNothingChanged(t *testing.T) {
 	}
 	if _, ok := r.Lookup("myapp"); !ok {
 		t.Error("tunnel went away despite its owner still being accepted")
+	}
+}
+
+// Snapshot backs `hop ps`. A reserved-but-unbound claim is deliberately absent:
+// it exists for the few milliseconds between the ack and the yamux upgrade, and
+// nothing can be routed to it yet.
+func TestSnapshotListsOnlyBoundTunnels(t *testing.T) {
+	r := NewRegistry()
+
+	for _, sub := range []string{"zeta", "alpha"} {
+		_, gen, _, err := r.Reserve(sub, "laptop")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Bind(sub, gen, liveTunnel(t, sub))
+	}
+	if _, _, _, err := r.Reserve("pending", "phone"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := r.Snapshot()
+	if len(got) != 2 {
+		t.Fatalf("snapshot = %+v, want 2 entries", got)
+	}
+	// Sorted, so the table doesn't reshuffle between invocations.
+	if got[0].Sub != "alpha" || got[1].Sub != "zeta" {
+		t.Errorf("order = %q, %q; want alpha, zeta", got[0].Sub, got[1].Sub)
+	}
+	if got[0].Owner != "laptop" {
+		t.Errorf("owner = %q, want %q", got[0].Owner, "laptop")
+	}
+	if got[0].Since.IsZero() {
+		t.Error("Since is zero; uptime would be reported as decades")
+	}
+}
+
+// Uptime is measured from the bind, not the reserve, so a takeover reports how
+// long the *current* session has been serving rather than how long the name has
+// been held.
+func TestSnapshotUptimeRestartsOnTakeover(t *testing.T) {
+	r := NewRegistry()
+
+	_, gen, _, err := r.Reserve("myapp", "laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Bind("myapp", gen, liveTunnel(t, "myapp"))
+	first := r.Snapshot()[0].Since
+
+	// Long enough that the two timestamps differ on any clock granularity,
+	// short enough not to be felt.
+	time.Sleep(time.Millisecond)
+
+	_, gen2, evicted, err := r.Reserve("myapp", "laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evicted == nil {
+		t.Fatal("want the previous tunnel handed back for closing")
+	}
+	r.Bind("myapp", gen2, liveTunnel(t, "myapp"))
+
+	if second := r.Snapshot()[0].Since; !second.After(first) {
+		t.Errorf("Since = %v after takeover, want later than %v", second, first)
 	}
 }

@@ -11,7 +11,10 @@ import (
 
 // Tunnel is one connected agent, plus the reverse proxy that reaches it.
 type Tunnel struct {
-	Sub   string
+	Sub string
+	// Local is the address the agent says it forwards to. Reported by the
+	// agent, shown in listings, and never used to route anything.
+	Local string
 	sess  *yamux.Session
 	proxy *httputil.ReverseProxy
 }
@@ -25,8 +28,8 @@ type Tunnel struct {
 // publicScheme is what the browser used, which is not always what reached us:
 // behind a TLS-terminating reverse proxy the inbound request is plaintext even
 // though the client spoke HTTPS.
-func NewTunnel(sub string, sess *yamux.Session, publicScheme string) *Tunnel {
-	t := &Tunnel{Sub: sub, sess: sess}
+func NewTunnel(sub, local string, sess *yamux.Session, publicScheme string) *Tunnel {
+	t := &Tunnel{Sub: sub, Local: local, sess: sess}
 	t.proxy = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Scheme = "http"

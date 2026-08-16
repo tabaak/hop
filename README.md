@@ -10,22 +10,29 @@ automatically via ACME DNS-01. Live at `*.hop.vokh.dev`.
 
 ## hop — the agent
 
-One subcommand. Anything else prints usage and exits 2.
+Three subcommands. Anything else prints usage and exits 2.
 
 ```sh
-hop http <port> [flags]
+hop http <port> [flags]   # open a tunnel
+hop ps [flags]            # list the tunnels currently up (aliases: ls, status)
+hop stop <name>...        # stop tunnels running on this machine
 ```
 
-| Flag                  | Default                                    |
-|-----------------------|--------------------------------------------|
-| `--sub <name>`        | server picks a random name                 |
-| `--server <host:port>`| `$HOP_SERVER`, else `hop.vokh.dev:7443`    |
-| `--token <token>`     | `$HOP_TOKEN`                               |
-| `--local-host <ip>`   | `127.0.0.1`                                |
-| `--host-header <v>`   | `preserve`; or `rewrite`, or a literal value |
-| `--quiet`             | off; suppresses the request log            |
-| `--no-color`          | off; also honours `NO_COLOR`               |
-| `--no-tls`            | off; refused unless the peer is private    |
+| Flag                  | Default                                    | Applies to |
+|-----------------------|--------------------------------------------|------------|
+| `--sub <name>`        | server picks a random name                 | `http`     |
+| `-d`, `--detach`      | off; runs in the background                | `http`     |
+| `--local-host <ip>`   | `127.0.0.1`                                | `http`     |
+| `--host-header <v>`   | `preserve`; or `rewrite`, or a literal value | `http`   |
+| `--quiet`             | off; suppresses the request log            | `http`     |
+| `--json`              | off; prints the listing as JSON            | `ps`       |
+| `-a`, `--all`         | off; stops every tunnel on this machine    | `stop`     |
+| `--server <host:port>`| `$HOP_SERVER`, else `hop.vokh.dev:7443`    | `http`, `ps` |
+| `--token <token>`     | `$HOP_TOKEN`                               | `http`, `ps` |
+| `--no-color`          | off; also honours `NO_COLOR`               | all        |
+| `--no-tls`            | off; refused unless the peer is private    | `http`, `ps` |
+
+`stop` needs no token or server: it signals processes here.
 
 Put the server and token in your shell profile once, and the everyday
 invocation is two words:
@@ -94,6 +101,103 @@ connection, and the latter would mean seeing nothing in the log until the user
 navigated away.
 
 `Ctrl-C` releases the name immediately.
+
+### Running in the background
+
+`-d` puts the tunnel in its own session and gives the terminal back:
+
+```sh
+hop http 3000 --sub myapp -d
+```
+
+```
+  https://myapp.hop.vokh.dev  →  http://127.0.0.1:3000
+
+  detached, pid 55899. hop stop myapp to stop it, ~/.hop/log/55899.log for the request log.
+```
+
+The prompt returns only once the tunnel is **up**, not once the process has
+started — so a bad token or an unreachable server is still an error in your
+terminal, with the reason quoted from the agent's log, rather than a success
+message followed by a process that quietly died. Until it has connected once, a
+detached agent doesn't retry, for the same reason: at startup someone is waiting
+to hear whether this worked. After it has been up, it reconnects with the usual
+backoff and survives a server restart.
+
+The request log goes to `~/.hop/log/<pid>.log`, so `tail -f` still shows traffic.
+Closing the terminal doesn't take the tunnel with it.
+
+### Stopping tunnels
+
+```sh
+hop stop myapp        # by name, or by PID
+hop stop web docs     # several at once
+hop stop --all        # or -a
+```
+
+```
+  stopped myapp  pid 55899 → 127.0.0.1:13000
+```
+
+This works on **any** agent this machine is running, detached or not — a tunnel
+started in another terminal is no harder to stop than a detached one. It sends
+`SIGTERM`, waits five seconds, then `SIGKILL`s anything still there.
+
+`hop stop` is deliberately local: `hop ps` lists what every device is serving,
+but the process behind your phone's tunnel is on your phone. Naming one says so
+rather than failing vaguely.
+
+### What's up right now
+
+An agent only knows about its own tunnel, so `hop ps` asks the server. `hop ls`
+and `hop status` are the same command.
+
+```sh
+hop ps
+```
+
+```
+  NAME        UP       PID      FORWARDS TO        URL
+  calm-raven  38s      55901    127.0.0.1:3000     https://calm-raven.hop.vokh.dev
+  myapp       2d3h     55899    192.168.1.42:8080  https://myapp.hop.vokh.dev
+
+  2 tunnel(s) up, all on laptop.
+```
+
+`FORWARDS TO` is what each agent points at locally, which is how you tell two
+tunnels apart when the names don't. The server can't work this out — the agent
+reports it in the handshake, and nothing routes on it.
+
+Columns appear only when they distinguish something. `OWNER` shows up once a
+second device connects; `PID` once any listed tunnel is running here, which is
+exactly the set `hop stop` can reach:
+
+```
+  NAME        OWNER   UP       PID      FORWARDS TO      URL
+  blog        phone   4h12m    -        10.0.0.9:5173    https://blog.hop.vokh.dev
+  calm-raven  laptop  38s      55901    127.0.0.1:3000   https://calm-raven.hop.vokh.dev
+  myapp       laptop  2d3h     55899    127.0.0.1:3000   https://myapp.hop.vokh.dev
+
+  3 tunnel(s) up.
+```
+
+That's the token label, so "which machine is still serving that, and can I shut
+the laptop?" is answered in the table. Every valid token sees every tunnel:
+labels name the devices of one operator, not separate tenants. `--json` always
+carries `owner`, whatever the table shows, so a script's parsing doesn't change
+when you mint a second token.
+
+`--json` prints the server's answer verbatim for scripting:
+
+```sh
+hop ps --json | jq -r '.[] | select(.owner == "laptop") | .url'
+```
+
+It dials the same control port a tunnel does, with the same token over the same
+TLS, and hangs up without claiming a name — so `hop ps` never appears in its own
+output, and there is no HTTP endpoint to secure separately. Uptime is measured
+on the server and sent as an elapsed time, so a VPS clock a few minutes out
+can't produce a tunnel that started in the future.
 
 Subdomains must match `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`, and a handful of
 names are reserved (`www`, `api`, `admin`, `app`, `mail`, `hop`, …).
@@ -290,6 +394,22 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
   copy, which is what lets an upgraded connection carry arbitrary framing. This
   is safe only because the server disables keep-alives on its side of the
   tunnel, so each stream carries exactly one request.
+- **`hop ps` shows every device's tunnels**, not just this machine's, and needs
+  a valid token to answer at all — which names are in use is worth as much to
+  someone picking a target as it is to you.
+- **Every running agent records itself** in `~/.hop/run/<pid>.json`, which is
+  how `hop ps` fills the PID column and `hop stop` finds the process. Liveness
+  is an advisory lock the agent holds on that file, not a check that its PID
+  exists: the kernel drops the lock however the process dies, so a free lock
+  proves the record is stale, while a recycled PID would eventually have made
+  `hop stop` signal something unrelated. Records of dead agents are swept on the
+  next `ps` or `stop`.
+- **The forwarded address is sanitised before it is printed.** It is the one
+  listing field a *peer* supplies, and it lands in another operator's terminal,
+  so control characters are stripped and the length is capped — otherwise an
+  agent could clear your screen or forge a row in your table.
+- **Detaching is Unix-only.** It needs `setsid` and `flock`; `hop http` in the
+  foreground has no such requirement.
 - **Reconnects back off** from 1s to 30s. A session that survives 30s resets the
   backoff, so an overnight tunnel doesn't crawl after one blip.
 - **A dead local app returns a readable 502** through the tunnel rather than a
@@ -297,7 +417,8 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
 
 ## Not yet
 
-- **One tunnel per process.** Two ports means two terminals.
+- **One tunnel per process.** Two ports means two processes — though with `-d`
+  that no longer means two terminals.
 - **HTTP only.** No raw TCP, so no tunnelling Postgres or SSH.
 - **The agent's token must be in the environment or on the command line.** The
   server side now has a proper token file; the client side still means
@@ -312,6 +433,7 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
 go test -race ./...
 ```
 
-Covers the registry's claim/eviction logic, Host parsing, and full end-to-end
-tunnels in both plaintext and TLS modes. The TLS test uses a throwaway CA rather
+Covers the registry's claim/eviction logic, Host parsing, the `hop ps` listing
+(including that it authenticates and claims no name of its own), and full
+end-to-end tunnels in both plaintext and TLS modes. The TLS test uses a throwaway CA rather
 than skipping verification, so a broken chain fails the test.

@@ -18,11 +18,16 @@ import (
 // (https://no-color.org), as is a --no-color flag for the times it isn't.
 var colour = false
 
-func initColour(disabled bool) {
+func initColour(disabled bool) { initColourOn(os.Stderr, disabled) }
+
+// initColourOn takes the stream because the two commands write to different
+// ones: the request log goes to stderr so it can be watched while stdout is
+// redirected, and `hop ps` writes its table to stdout so it can be piped.
+func initColourOn(f *os.File, disabled bool) {
 	if disabled || os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
 		return
 	}
-	info, err := os.Stderr.Stat()
+	info, err := f.Stat()
 	colour = err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 

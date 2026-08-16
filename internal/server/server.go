@@ -107,7 +107,17 @@ func (s *Server) ServeControl(ln net.Listener) error {
 
 func (s *Server) handleAgent(conn net.Conn) {
 	remote := conn.RemoteAddr()
-	c, ok := s.handshake(conn)
+	h, label, ok := s.hello(conn)
+	if !ok {
+		conn.Close()
+		return
+	}
+	if h.Op == proto.OpList {
+		s.serveList(conn, remote, label)
+		return
+	}
+
+	c, ok := s.claim(conn, h, label)
 	if !ok {
 		conn.Close()
 		return
@@ -135,7 +145,7 @@ func (s *Server) handleAgent(conn net.Conn) {
 		return
 	}
 
-	t := NewTunnel(sub, sess, s.cfg.PublicScheme)
+	t := NewTunnel(sub, c.local, sess, s.cfg.PublicScheme)
 	s.reg.Bind(sub, gen, t)
 	log.Printf("agent %s: tunnel up for %q (%d live)", who, sub, s.reg.Count())
 
@@ -148,29 +158,63 @@ func (s *Server) handleAgent(conn net.Conn) {
 type claim struct {
 	sub     string
 	label   string
+	local   string
 	gen     uint64
 	evicted *Tunnel
 }
 
-// handshake reads Hello, authenticates, claims a name and acks. On any failure
-// it reports the reason to the agent and returns ok=false.
-func (s *Server) handshake(conn net.Conn) (c claim, ok bool) {
+// hello reads the opening frame and authenticates it, returning the label that
+// owns the token. Everything a connection may go on to do needs both, so this
+// runs before the operations diverge — there is no path that reaches the
+// registry unauthenticated.
+func (s *Server) hello(conn net.Conn) (h proto.Hello, label string, ok bool) {
 	if err := conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		return claim{}, false
+		return h, "", false
 	}
-
-	var h proto.Hello
 	if err := proto.Read(conn, &h); err != nil {
 		log.Printf("agent %s: bad hello: %v", conn.RemoteAddr(), err)
-		return claim{}, false
+		return h, "", false
 	}
-	label, ok := s.cfg.Tokens.Lookup(h.Token)
+	label, ok = s.cfg.Tokens.Lookup(h.Token)
 	if !ok {
 		log.Printf("agent %s: rejected token", conn.RemoteAddr())
+		// A HelloAck, whatever the op. Its Err field is the one thing both
+		// reply types share a name for, so a refused list still decodes.
 		proto.Write(conn, proto.HelloAck{Err: "invalid token"})
-		return claim{}, false
+		return h, "", false
 	}
+	return h, label, true
+}
 
+// serveList answers `hop ps` and hangs up. No yamux upgrade, no claim, nothing
+// to release: the reply is the whole exchange.
+//
+// Every valid token sees every tunnel, not just its own. Labels identify the
+// devices of one operator rather than separate tenants, and "which of my
+// machines is serving that name" is most of the reason to ask.
+func (s *Server) serveList(conn net.Conn, remote net.Addr, label string) {
+	defer conn.Close()
+
+	live := s.reg.Snapshot()
+	out := make([]proto.TunnelInfo, 0, len(live))
+	for _, l := range live {
+		out = append(out, proto.TunnelInfo{
+			Subdomain:     l.Sub,
+			URL:           s.urlFor(l.Sub),
+			Owner:         l.Owner,
+			Local:         l.Local,
+			UptimeSeconds: int64(time.Since(l.Since).Seconds()),
+		})
+	}
+	if err := proto.Write(conn, proto.Listing{Tunnels: out}); err != nil {
+		return
+	}
+	log.Printf("agent %s (%s): listed %d tunnel(s)", remote, label, len(out))
+}
+
+// claim reserves the requested name for label and acks it. On failure it
+// reports the reason to the agent and returns ok=false.
+func (s *Server) claim(conn net.Conn, h proto.Hello, label string) (c claim, ok bool) {
 	// Ownership is keyed on the label, not on the secret. Rotating a token
 	// therefore keeps the names its owner holds, and two devices with separate
 	// tokens cannot evict each other — which is the point of issuing them
@@ -192,7 +236,7 @@ func (s *Server) handshake(conn net.Conn) (c claim, ok bool) {
 		s.reg.Release(sub, gen)
 		return claim{}, false
 	}
-	return claim{sub: sub, label: label, gen: gen, evicted: evicted}, true
+	return claim{sub: sub, label: label, local: proto.CleanLocal(h.Local), gen: gen, evicted: evicted}, true
 }
 
 func (s *Server) urlFor(sub string) string {

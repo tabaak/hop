@@ -49,9 +49,14 @@ work with no extra code.
 On the raw TLS conn, before yamux: length-prefixed JSON.
 
 ```go
-type Hello struct { Token, Subdomain, Version string }
+type Hello struct { Token, Op, Subdomain, Local, Version string }
 type HelloAck struct { URL, Subdomain string; Err string }
+type Listing struct { Tunnels []TunnelInfo; Err string }
 ```
+
+`Op` picks what the connection is for: `tunnel` (the default, and what an empty
+value means) or `list`, which answers `hop ps` and hangs up without upgrading to
+yamux or claiming a name.
 
 Then both sides upgrade to yamux. Note the roles are inverted vs. the TCP
 direction: the agent dials, but the **server** opens streams, so `hopd` runs
@@ -145,6 +150,15 @@ its next connection; the agent then reconnects once, is refused, and exits. A
 file that fails to parse is rejected in favour of the loaded set, so a
 truncated write costs a log line rather than every tunnel.
 
+`hop ps` lists what is currently served — name, owning label, uptime, URL —
+with `--json` for scripting. Once tunnels can come from several devices, no
+single agent knows the answer, so it has to come from the server.
+
+`hop http <port> -d` detaches, and `hop stop <name>` / `--all` ends tunnels
+running on this machine. The prompt comes back only once the tunnel is up, so a
+refused token is still an error in the terminal rather than a background process
+that quietly died.
+
 Remaining:
 - `~/.hop.yaml` client config, so `--token` isn't needed on every invocation
 
@@ -201,6 +215,42 @@ same device as a stranger and refusing it its own subdomain.
 survives the atomic-rename that editors and config management do — a watch
 registered on the original inode would not. Five seconds of delay is
 irrelevant for adding a device and acceptable for removing one.
+
+**`hop ps` reuses the control port instead of adding an HTTP endpoint.** The
+listing inherits the TLS and the token auth already protecting that port, and
+needs nothing exposed through whatever fronts the ingress — which, behind
+Caddy, would have meant a second thing to route and secure. The cost is one
+field in `Hello` and one reply frame. Every valid token sees every tunnel:
+labels distinguish an operator's devices, not tenants, and hiding other labels'
+names would break the one question worth asking ("which machine is still
+serving that?").
+
+**A detached agent is tracked by a locked file, not by a PID file.** Every
+running agent — detached or not — holds an advisory lock on
+`~/.hop/run/<pid>.json` for its lifetime. Liveness is then "is the lock held?",
+which the kernel answers correctly however the process died, including SIGKILL
+and power loss. The obvious alternative, checking whether the PID exists, is
+wrong in a way that only shows up later: after enough process churn or a reboot,
+the number belongs to something else and `hop stop` signals a stranger.
+
+Tracking foreground agents too is deliberate. `hop stop myapp` failing because
+that tunnel happened to be started in a terminal would be a distinction the user
+never made.
+
+**The agent tells the server what it forwards to, and the server sanitises it.**
+`Local` is carried in the handshake purely so a listing can show it; nothing
+routes on it. It is also the only listing field that originates with a peer
+rather than with the server, and it is printed straight into another operator's
+terminal — so control characters are stripped and the length capped on the way
+in. An agent that could inject `\r` or an ANSI sequence could forge a row in
+somebody else's `hop ps`. The client applies the same cleaning to the addresses
+it reads from its own state files, because a display path that trusts its input
+is one hand-edited file away from the same problem.
+
+**`hop stop` is local-only.** Reaching another device's agent would mean the
+server could tell an agent to exit — a much larger idea, and one that turns a
+listing credential into a remote kill switch. Naming a tunnel that belongs to
+another device says so explicitly instead.
 
 **`--no-tls` is refused for non-private peers rather than warned about.** The
 token is the first thing written to a new connection, so plaintext leaks it to

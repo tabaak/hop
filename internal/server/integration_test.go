@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -237,12 +238,77 @@ func TestUnknownSubdomainIs404(t *testing.T) {
 	}
 }
 
+// `hop ps` is the only way to see tunnels other devices are serving, so the
+// listing has to come from the server over the control port rather than from
+// anything the local agent knows.
+func TestListReportsLiveTunnels(t *testing.T) {
+	h := newHarness(t, false)
+
+	got, err := client.List(h.agent)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("listed %d tunnels, want 1: %+v", len(got), got)
+	}
+	if got[0].Subdomain != "myapp" {
+		t.Errorf("subdomain = %q, want %q", got[0].Subdomain, "myapp")
+	}
+	// The label, never the token.
+	if got[0].Owner != "test-agent" {
+		t.Errorf("owner = %q, want %q", got[0].Owner, "test-agent")
+	}
+	if want := "http://myapp.localhost"; got[0].URL != want {
+		t.Errorf("url = %q, want %q", got[0].URL, want)
+	}
+	// Reported by the agent in its handshake — the server has no other way to
+	// know what a tunnel forwards to.
+	if got[0].Local != h.local {
+		t.Errorf("local = %q, want the agent's forward target %q", got[0].Local, h.local)
+	}
+	if got[0].UptimeSeconds < 0 {
+		t.Errorf("uptime = %ds, want a non-negative duration", got[0].UptimeSeconds)
+	}
+}
+
+// Listing must not claim a name of its own. If it did, every `hop ps` would
+// consume a random subdomain and show up in its own output.
+func TestListDoesNotClaimAName(t *testing.T) {
+	h := newHarness(t, false)
+
+	for i := 0; i < 3; i++ {
+		got, err := client.List(h.agent)
+		if err != nil {
+			t.Fatalf("List %d: %v", i, err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("after %d listings, %d tunnels are up, want 1: %+v", i+1, len(got), got)
+		}
+	}
+}
+
+// The listing says which names are in use, which is worth as much to an
+// attacker choosing a target as it is to their owner.
+func TestListRequiresAValidToken(t *testing.T) {
+	h := newHarness(t, false)
+
+	cfg := h.agent
+	cfg.Token = "not-the-token"
+	_, err := client.List(cfg)
+	if !errors.Is(err, client.ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+}
+
 // harness wires a local app, a hop server and a connected agent together.
 type harness struct {
 	ingress *httptest.Server
 	// local is the address the agent forwards to, i.e. what --host-header
 	// rewrite should produce.
 	local string
+	// agent is the config the connected agent used, so a test can dial the
+	// control port a second time with the same credentials.
+	agent client.Config
 }
 
 // harnessOpts covers the agent-side knobs the tests vary.
@@ -356,7 +422,7 @@ func newHarnessOpts(t *testing.T, opts harnessOpts) *harness {
 
 	ingress := httptest.NewServer(srv)
 	t.Cleanup(ingress.Close)
-	h := &harness{ingress: ingress, local: local}
+	h := &harness{ingress: ingress, local: local, agent: cfg}
 
 	h.waitForTunnel(t)
 	return h

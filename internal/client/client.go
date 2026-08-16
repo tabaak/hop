@@ -43,6 +43,10 @@ type Config struct {
 	// Log, if set, is called once per request. Called from the per-stream
 	// goroutine, so it must be safe for concurrent use.
 	Log func(Request)
+	// OnUp, if set, is called each time the tunnel comes up, including after a
+	// reconnect — the name can change if the old one was taken while the agent
+	// was away. Called from Run's goroutine, before any request is served.
+	OnUp func(sub, url string)
 }
 
 // Request is one logged request. Status and Took are filled in when the
@@ -55,9 +59,10 @@ type Request struct {
 	UserAgent string
 }
 
-// ErrRefused means the server rejected the tunnel for a reason that won't
-// change by retrying (bad token, taken name).
-var ErrRefused = errors.New("tunnel refused")
+// ErrRefused means the server rejected the request for a reason that won't
+// change by retrying (bad token, taken name). Worded without a noun because
+// both a tunnel and a listing can be refused; each caller supplies its own.
+var ErrRefused = errors.New("refused")
 
 // Run connects once and serves until the tunnel drops. It returns the
 // subdomain the server assigned, so a reconnect can ask for the same one and
@@ -85,6 +90,9 @@ func Run(cfg Config) (assigned string, err error) {
 	defer sess.Close()
 
 	fmt.Fprintf(os.Stderr, "\n  %s  →  http://%s\n\n", ack.URL, cfg.Local)
+	if cfg.OnUp != nil {
+		cfg.OnUp(ack.Subdomain, ack.URL)
+	}
 
 	for {
 		stream, err := sess.Accept()
@@ -139,7 +147,13 @@ func handshake(conn net.Conn, cfg Config) (proto.HelloAck, error) {
 	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return ack, err
 	}
-	hello := proto.Hello{Token: cfg.Token, Subdomain: cfg.Subdomain, Version: proto.Version}
+	hello := proto.Hello{
+		Token:     cfg.Token,
+		Op:        proto.OpTunnel,
+		Subdomain: cfg.Subdomain,
+		Local:     cfg.Local,
+		Version:   proto.Version,
+	}
 	if err := proto.Write(conn, hello); err != nil {
 		return ack, fmt.Errorf("send hello: %w", err)
 	}

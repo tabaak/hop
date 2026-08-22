@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"hop.vokh.dev/internal/client"
+	"hop.vokh.dev/internal/inspect"
 	"hop.vokh.dev/internal/server"
 	"hop.vokh.dev/internal/tokens"
 )
@@ -318,6 +319,9 @@ type harnessOpts struct {
 	rewriteHost bool
 	hostHeader  string
 	log         func(client.Request)
+	// newTap, if set, is called with the local app's address once it is known,
+	// and its result is handed to the agent.
+	newTap func(local string) client.Tap
 }
 
 func newHarness(t *testing.T, useTLS bool) *harness {
@@ -398,6 +402,9 @@ func newHarnessOpts(t *testing.T, opts harnessOpts) *harness {
 		Token:     testToken,
 		TLS:       opts.useTLS,
 		Log:       opts.log,
+	}
+	if opts.newTap != nil {
+		cfg.Tap = opts.newTap(local)
 	}
 	switch {
 	case opts.hostHeader != "":
@@ -499,4 +506,178 @@ func selfSignedCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	pool.AddCert(leaf)
 
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, pool
+}
+
+// The inspector sits in a tee on both directions of a live tunnel, so what it
+// records has to match what the caller and the local app actually exchanged —
+// and the request must still work while it does.
+func TestInspectorRecordsALiveTunnel(t *testing.T) {
+	var hub *inspect.Hub
+	h := newHarnessOpts(t, harnessOpts{scheme: "http", newTap: func(local string) client.Tap {
+		hub = inspect.New(local)
+		return inspectTap{hub}
+	}})
+
+	req, err := http.NewRequest("POST", h.ingress.URL+"/echo?q=1", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "myapp.localhost"
+	req.Header.Set("X-Trace", "abc")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	rec := waitForRecord(t, hub, "/echo?q=1")
+	if rec.Method != "POST" || rec.Request.Body != "payload" {
+		t.Errorf("recorded %s with body %q", rec.Method, rec.Request.Body)
+	}
+	if got := headerOf(rec.Request.Headers, "X-Trace"); got != "abc" {
+		t.Errorf("X-Trace = %q, want abc", got)
+	}
+	if rec.Status != 200 || rec.Response.Body != "POST /echo?q=1 payload" {
+		t.Errorf("recorded status %d body %q", rec.Status, rec.Response.Body)
+	}
+}
+
+// Replaying sends the recorded bytes straight to the local app, bypassing the
+// tunnel — so it works on a request the inspector saw pass through it.
+func TestInspectorReplaysThroughToTheLocalApp(t *testing.T) {
+	var hub *inspect.Hub
+	h := newHarnessOpts(t, harnessOpts{scheme: "http", newTap: func(local string) client.Tap {
+		hub = inspect.New(local)
+		return inspectTap{hub}
+	}})
+
+	req, _ := http.NewRequest("POST", h.ingress.URL+"/echo", strings.NewReader("again"))
+	req.Host = "myapp.localhost"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	rec := waitForRecord(t, hub, "/echo")
+	id, err := hub.Replay(rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed := waitForID(t, hub, id)
+	if !replayed.Replayed {
+		t.Error("the replay is not marked as one")
+	}
+	if replayed.Status != 200 || replayed.Response.Body != "POST /echo again" {
+		t.Errorf("replay got %d %q", replayed.Status, replayed.Response.Body)
+	}
+}
+
+// A streaming response must not be held back by the capture: the inspector
+// tees bytes as they pass rather than buffering the exchange.
+func TestInspectorDoesNotStallAnUpgrade(t *testing.T) {
+	var hub *inspect.Hub
+	h := newHarnessOpts(t, harnessOpts{scheme: "http", newTap: func(local string) client.Tap {
+		hub = inspect.New(local)
+		return inspectTap{hub}
+	}})
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(h.ingress.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	io.WriteString(conn, "GET /upgrade HTTP/1.1\r\nHost: myapp.localhost\r\n"+
+		"Connection: Upgrade\r\nUpgrade: raw-echo\r\n\r\n")
+
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status, "101") {
+		t.Fatalf("status = %q", status)
+	}
+	// Headers, then the echo, which only arrives if nothing buffered the
+	// connection waiting for it to end.
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+	}
+	io.WriteString(conn, "ping\n")
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(line) != "echo:ping" {
+		t.Errorf("echo = %q", line)
+	}
+
+	// The record exists while the connection is still open, with the 101 on it.
+	rec := waitForRecord(t, hub, "/upgrade")
+	if rec.Status != 101 {
+		t.Errorf("recorded status %d, want 101", rec.Status)
+	}
+	if rec.Done {
+		t.Error("the exchange is marked done while the connection is still open")
+	}
+}
+
+// inspectTap is the same adapter cmd/hop uses: a nil *Exchange has to become a
+// nil Capture rather than an interface holding a nil pointer.
+type inspectTap struct{ hub *inspect.Hub }
+
+func (t inspectTap) Begin(head []byte) client.Capture {
+	if ex := t.hub.Begin(head); ex != nil {
+		return ex
+	}
+	return nil
+}
+
+// waitForRecord waits for a record of a request to target, since the agent
+// records from its own goroutine and may not have finished when the caller's
+// response has.
+func waitForRecord(t *testing.T, hub *inspect.Hub, target string) inspect.Record {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, rec := range hub.Records() {
+			if rec.Target == target && rec.Status != 0 {
+				return rec
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no record for %s within 5s", target)
+	return inspect.Record{}
+}
+
+func waitForID(t *testing.T, hub *inspect.Hub, id int64) inspect.Record {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, rec := range hub.Records() {
+			if rec.ID == id && rec.Status != 0 {
+				return rec
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no record with id %d within 5s", id)
+	return inspect.Record{}
+}
+
+func headerOf(headers []inspect.Header, name string) string {
+	for _, h := range headers {
+		if strings.EqualFold(h.Name, name) {
+			return h.Value
+		}
+	}
+	return ""
 }

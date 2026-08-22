@@ -43,6 +43,9 @@ type Config struct {
 	// Log, if set, is called once per request. Called from the per-stream
 	// goroutine, so it must be safe for concurrent use.
 	Log func(Request)
+	// Tap, if set, receives a copy of every exchange for the local inspector.
+	// Also called from the per-stream goroutine.
+	Tap Tap
 	// OnUp, if set, is called each time the tunnel comes up, including after a
 	// reconnect — the name can change if the old one was taken while the agent
 	// was away. Called from Run's goroutine, before any request is served.
@@ -57,6 +60,28 @@ type Request struct {
 	Status    int
 	Took      time.Duration
 	UserAgent string
+}
+
+// Tap observes traffic without altering it. The agent knows nothing about what
+// is on the other end of this interface, which keeps the inspector — the only
+// implementation — off the forwarding path's list of concerns.
+type Tap interface {
+	// Begin starts recording the exchange whose request head is head. It may
+	// return nil to skip one.
+	Begin(head []byte) Capture
+}
+
+// Capture collects one exchange. Its writers are teed off the byte stream in
+// both directions, so they must never block and never fail: a Write that
+// returned an error would tear down the request being inspected.
+type Capture interface {
+	// Request is fed the request body, Response the response head and body.
+	Request() io.Writer
+	Response() io.Writer
+	// Fail records an exchange that never reached the local app.
+	Fail(status int, msg string)
+	// Close ends the exchange, and may be called more than once.
+	Close()
 }
 
 // ErrRefused means the server rejected the request for a reason that won't
@@ -179,9 +204,17 @@ func forward(stream net.Conn, cfg Config) {
 	src := bufio.NewReader(stream)
 	head, headErr := readHead(src)
 	var rec Request
+	var capture Capture
 	if headErr == nil {
 		rec.Method, rec.Target = requestLine(head)
 		rec.UserAgent = headerValue(head, "user-agent")
+		if cfg.Tap != nil {
+			// Started from the head as it arrived, before any Host rewrite, so
+			// the inspector shows the request the caller actually sent.
+			if capture = cfg.Tap.Begin(head); capture != nil {
+				defer capture.Close()
+			}
+		}
 	}
 
 	// Started before the dial so a slow or refused connection to the local app
@@ -194,6 +227,9 @@ func forward(stream net.Conn, cfg Config) {
 		if cfg.Log != nil {
 			rec.Status, rec.Took = http.StatusBadGateway, time.Since(start)
 			cfg.Log(rec)
+		}
+		if capture != nil {
+			capture.Fail(http.StatusBadGateway, err.Error())
 		}
 		writeGatewayError(stream, cfg.Local)
 		return
@@ -220,7 +256,15 @@ func forward(stream net.Conn, cfg Config) {
 			cfg.Log(rec)
 		}}
 	}
-	splice(stream, src, up, down)
+	// Teed rather than buffered: the copy goes to the inspector as the bytes
+	// pass, so streaming responses and WebSockets are unaffected by watching
+	// them. Both tees sit outside the splice, which still moves the real bytes.
+	var body io.Reader = src
+	if capture != nil {
+		body = io.TeeReader(src, capture.Request())
+		down = io.TeeReader(down, capture.Response())
+	}
+	splice(stream, body, up, down)
 }
 
 // splice copies both directions and returns once each has finished. src and

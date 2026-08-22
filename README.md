@@ -25,6 +25,7 @@ hop log <name>            # read a detached tunnel's output (alias: logs)
 | `-d`, `--detach`      | off; runs in the background                | `http`     |
 | `--local-host <ip>`   | `127.0.0.1`                                | `http`     |
 | `--host-header <v>`   | `preserve`; or `rewrite`, or a literal value | `http`   |
+| `--inspect`           | off; serves the request inspector on `127.0.0.1:4040` | `http` |
 | `--quiet`             | off; suppresses the request log            | `http`     |
 | `--json`              | off; prints the listing as JSON            | `ps`       |
 | `-a`, `--all`         | off; stops every tunnel on this machine    | `stop`     |
@@ -73,6 +74,9 @@ hop http 3000 --host-header app.internal
 
 # No request log
 hop http 3000 --quiet
+
+# With the request inspector on http://127.0.0.1:4040
+hop http 3000 --inspect
 ```
 
 Requests are logged live to stderr as they complete, with the calling device
@@ -104,6 +108,56 @@ connection, and the latter would mean seeing nothing in the log until the user
 navigated away.
 
 `Ctrl-C` releases the name immediately.
+
+### The request inspector
+
+`--inspect` serves a page on `http://127.0.0.1:4040` showing the last 50
+requests through the tunnel: headers and bodies both ways, status, time to
+first byte, and total duration. Methods are badged and statuses coloured on the
+same scheme as the terminal log — green for `GET` and 2xx, blue for `POST`,
+amber for `PUT`/`PATCH` and 4xx, red for `DELETE` and 5xx, purple for anything
+else and for a 101 upgrade, `HEAD` and `OPTIONS` dimmed — so a request looks
+the same in both places. The feed is live over server-sent events, so
+requests appear as they arrive rather than on a refresh.
+
+```sh
+hop http 3000 --inspect
+
+#   inspector  →  http://127.0.0.1:4040
+#
+#   https://myapp.hop.vokh.dev  →  http://127.0.0.1:3000
+```
+
+Two things you can do with a request once you have it:
+
+- **Replay request** sends the recorded bytes straight to the local app,
+  bypassing the tunnel — with `Connection: close` in place of whatever
+  connection header the request carried, since it goes out on a connection of
+  its own. Useful for the webhook that arrived once and failed:
+  fix the handler, replay, repeat, without asking the sender to try again. The
+  replay shows up in the feed marked as one.
+- **Copy as cURL** builds the command against the public URL, so you can hand
+  the request to a colleague or a shell script.
+
+Worth knowing:
+
+- **Capture is a tee, not a buffer.** Bytes are copied as they pass, so
+  streaming responses, SSE and WebSockets are unaffected by watching them — a
+  long-lived connection shows up with its status as soon as the head arrives,
+  and its total duration when it closes.
+- **Bodies are capped at 64KB per direction.** Past that the request still
+  works in full; only the copy stops, and the record says how much was dropped.
+  A request whose body was truncated can't be replayed, since its
+  `Content-Length` would no longer match — the button says so.
+- **A body that isn't valid UTF-8 is reported, not shown.** Its size is there;
+  the bytes aren't.
+- **Loopback only, in both directions.** The listener binds `127.0.0.1`, and
+  requests whose `Host` isn't a loopback name are refused, so a public page
+  can't read the inspector through a rebound DNS name. Everything it holds —
+  cookies, auth headers, whole bodies — is exactly what must not leave the
+  machine.
+- **If something already holds 4040**, the inspector says so and the tunnel
+  carries on without it.
 
 ### Running in the background
 
@@ -458,6 +512,8 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
 - **The agent's token must be in the environment or on the command line.** The
   server side now has a proper token file; the client side still means
   `HOP_TOKEN` in your shell profile. A `~/.hop.yaml` is the open M3 item.
+- **The inspector is not configurable.** `--inspect` or nothing: no port flag,
+  no persistence, no filter rules beyond the search box.
 - **hopd's own server-side log reports 200 for upgraded connections.** The
   agent-side log gets this right; the server's status recorder doesn't see the
   101 because ReverseProxy hijacks the connection.
@@ -469,6 +525,8 @@ go test -race ./...
 ```
 
 Covers the registry's claim/eviction logic, Host parsing, the `hop ps` listing
-(including that it authenticates and claims no name of its own), and full
-end-to-end tunnels in both plaintext and TLS modes. The TLS test uses a throwaway CA rather
+(including that it authenticates and claims no name of its own), the
+inspector's ring buffer, capture and replay — including that it doesn't stall
+an upgraded connection — and full end-to-end tunnels in both plaintext and TLS
+modes. The TLS test uses a throwaway CA rather
 than skipping verification, so a broken chain fails the test.

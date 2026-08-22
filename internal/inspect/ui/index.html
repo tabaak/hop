@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hop inspector</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #fafafa;
+    --line: #e3e3e3;
+    --text: #1a1a1a;
+    --muted: #6b6b6b;
+    --accent: #1f5fbf;
+    --sel: #eef3fb;
+    --ok: #1a7f3c;
+    --warn: #9a6700;
+    --err: #b3261e;
+    --other: #723c91;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+
+  header {
+    border-bottom: 1px solid var(--line);
+    padding: 10px 16px;
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: .01em; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  header .meta b { font-weight: 500; color: var(--text); }
+  #status { margin-left: auto; font-size: 12px; color: var(--muted); }
+  #status::before {
+    content: ""; display: inline-block; width: 7px; height: 7px;
+    border-radius: 50%; background: #bbb; margin-right: 6px; vertical-align: middle;
+  }
+  #status.live::before { background: var(--ok); }
+
+  main { flex: 1; display: flex; min-height: 0; }
+
+  #list {
+    width: 44%; min-width: 320px; max-width: 620px;
+    border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .toolbar {
+    padding: 8px 12px; border-bottom: 1px solid var(--line);
+    display: flex; gap: 8px; align-items: center; background: var(--panel);
+  }
+  .toolbar input {
+    flex: 1; padding: 5px 8px; border: 1px solid var(--line);
+    border-radius: 3px; font: inherit; background: #fff; color: inherit;
+  }
+  .toolbar input:focus { outline: 2px solid var(--sel); border-color: var(--accent); }
+  .count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+  #rows { overflow-y: auto; flex: 1; }
+  /* Fixed layout so the path gets whatever the other columns don't need. With
+     auto layout the badges widen the method column and the path — the one
+     field with no useful bound on its length — ends up truncated to nothing. */
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  col.c-method { width: 104px; }
+  col.c-status { width: 68px; }
+  col.c-time   { width: 76px; }
+  col.c-when   { width: 108px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: baseline; }
+  th.num { text-align: right; }
+  th { position: sticky; top: 0; background: var(--bg); font-weight: 500; color: var(--muted); font-size: 11px;
+       text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--line); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--panel); }
+  tbody tr.selected { background: var(--sel); }
+  td.method { white-space: nowrap; }
+
+  /* Method badges, tinted to match the terminal log's colours: green for the
+     safe verbs, warmer as the request gets more destructive. The tint is what
+     makes the column scannable; the text carries the same hue at full
+     strength so it stays legible. */
+  .m {
+    display: inline-block; min-width: 58px; text-align: center;
+    font-size: 11px; font-weight: 600; letter-spacing: .03em;
+    padding: 1px 6px; border-radius: 3px; border: 1px solid transparent;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  .m-get    { color: var(--ok);      background: rgba(26, 127, 60, .10);  border-color: rgba(26, 127, 60, .22); }
+  .m-post   { color: var(--accent);  background: rgba(31, 95, 191, .10);  border-color: rgba(31, 95, 191, .22); }
+  .m-put    { color: var(--warn);    background: rgba(154, 103, 0, .10);  border-color: rgba(154, 103, 0, .22); }
+  .m-delete { color: var(--err);     background: rgba(179, 38, 30, .10);  border-color: rgba(179, 38, 30, .22); }
+  .m-other  { color: var(--other);   background: rgba(114, 60, 145, .10); border-color: rgba(114, 60, 145, .22); }
+  /* HEAD and OPTIONS are plumbing rather than intent, and are dimmed for the
+     same reason the terminal log dims them: so they don't compete. */
+  .m-quiet  { color: var(--muted);   background: var(--panel);            border-color: var(--line); }
+  td.path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.num { text-align: right; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* Written with the element to outrank td.num's muted colour. */
+  td.s2xx, .s2xx { color: var(--ok); }
+  td.s3xx, .s3xx { color: var(--accent); }
+  td.s4xx, .s4xx { color: var(--warn); }
+  td.s5xx, .s5xx { color: var(--err); }
+  td.pending, .pending { color: var(--muted); }
+  /* 101 is an upgrade, not a success — the terminal log gives it its own
+     colour for the same reason. */
+  td.s1xx, .s1xx { color: var(--other); }
+  /* The replay marker rides with the path rather than the method: the method
+     column is sized for a badge, and a tag beside it would spill into the
+     next column. */
+  .tag { border: 1px solid var(--line); border-radius: 2px; padding: 0 4px; font-size: 10px;
+         color: var(--muted); margin-right: 6px; text-transform: uppercase; letter-spacing: .04em; }
+
+  #detail { flex: 1; overflow-y: auto; min-width: 0; }
+  #detail .empty { color: var(--muted); padding: 40px 24px; }
+  .head {
+    padding: 12px 16px; border-bottom: 1px solid var(--line);
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    position: sticky; top: 0; background: var(--bg); z-index: 1;
+  }
+  .head .url { font-size: 13px; word-break: break-all; }
+  .actions { margin-left: auto; display: flex; gap: 8px; }
+  button {
+    font: inherit; padding: 5px 10px; border: 1px solid var(--line);
+    background: #fff; border-radius: 3px; cursor: pointer; color: var(--text);
+  }
+  button:hover { background: var(--panel); }
+  button:active { background: #f0f0f0; }
+  button:disabled { color: var(--muted); cursor: default; background: var(--panel); }
+
+  section { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  section h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); font-weight: 500; margin: 0 0 8px;
+  }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; word-break: break-all; }
+  pre {
+    margin: 0; padding: 10px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 3px; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+    max-height: 340px; overflow-y: auto; font-size: 12px;
+  }
+  .note { color: var(--muted); font-style: italic; }
+  #toast {
+    position: fixed; bottom: 16px; right: 16px; background: #1a1a1a; color: #fff;
+    padding: 8px 12px; border-radius: 3px; font-size: 12px; opacity: 0;
+    transition: opacity .15s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>hop inspector</h1>
+  <span class="meta">forwarding to <b id="local">…</b></span>
+  <span class="meta" id="public"></span>
+  <span id="status">connecting</span>
+</header>
+
+<main>
+  <div id="list">
+    <div class="toolbar">
+      <input id="filter" type="search" placeholder="Filter by method, path or status" autocomplete="off">
+      <span class="count" id="count"></span>
+    </div>
+    <div id="rows">
+      <table>
+        <colgroup>
+          <col class="c-method"><col><col class="c-status"><col class="c-time"><col class="c-when">
+        </colgroup>
+        <thead>
+          <tr><th>Method</th><th>Path</th><th class="num">Status</th><th class="num">Time</th><th class="num">When</th></tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  <div id="detail"><p class="empty">Select a request to see its headers and body.</p></div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+const state = { records: new Map(), selected: null, local: "", publicUrl: "", filter: "" };
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// methodClass mirrors methodColour in the terminal log, so a request looks the
+// same in both places.
+function methodClass(method) {
+  switch (method) {
+    case "GET": return "m-get";
+    case "HEAD": case "OPTIONS": return "m-quiet";
+    case "POST": return "m-post";
+    case "PUT": case "PATCH": return "m-put";
+    case "DELETE": return "m-delete";
+    default: return "m-other";
+  }
+}
+
+function statusClass(rec) {
+  if (!rec.status) return "pending";
+  return "s" + Math.floor(rec.status / 100) + "xx";
+}
+
+function ms(v) {
+  if (!v) return "—";
+  return v < 1000 ? v.toFixed(v < 10 ? 1 : 0) + " ms" : (v / 1000).toFixed(2) + " s";
+}
+
+function clock(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour12: false }) + "." +
+    String(d.getMilliseconds()).padStart(3, "0");
+}
+
+function sorted() {
+  return [...state.records.values()].sort((a, b) => b.id - a.id);
+}
+
+function matches(rec) {
+  const q = state.filter.trim().toLowerCase();
+  if (!q) return true;
+  return (rec.method + " " + rec.target + " " + (rec.status || "")).toLowerCase().includes(q);
+}
+
+function renderList() {
+  const rows = sorted().filter(matches);
+  $("count").textContent = rows.length + (rows.length === 1 ? " request" : " requests");
+  $("tbody").innerHTML = rows.map((rec) => `
+    <tr data-id="${rec.id}" class="${rec.id === state.selected ? "selected" : ""}">
+      <td class="method"><span class="m ${methodClass(rec.method)}">${esc(rec.method)}</span></td>
+      <td class="path" title="${esc(rec.target)}">${rec.replayed ? '<span class="tag">replay</span>' : ""}${esc(rec.target)}</td>
+      <td class="num ${statusClass(rec)}">${rec.status || (rec.done ? "—" : "…")}</td>
+      <td class="num">${ms(rec.tookMs)}</td>
+      <td class="num">${clock(rec.started)}</td>
+    </tr>`).join("");
+}
+
+function headerList(headers) {
+  if (!headers || !headers.length) return '<p class="note">No headers.</p>';
+  return "<dl>" + headers.map((h) =>
+    `<dt class="mono">${esc(h.name)}</dt><dd class="mono">${esc(h.value)}</dd>`).join("") + "</dl>";
+}
+
+function bodyBlock(msg) {
+  if (!msg.bytes) return '<p class="note">No body.</p>';
+  if (msg.binary) return `<p class="note">${msg.bytes} bytes of binary data, not shown.</p>`;
+  const trunc = msg.truncated
+    ? `<p class="note">Showing the first ${msg.body.length} of ${msg.bytes} bytes.</p>` : "";
+  return `<pre class="mono">${esc(msg.body)}</pre>${trunc}`;
+}
+
+function fullURL(rec) {
+  const base = state.publicUrl || ("http://" + (rec.host || state.local));
+  return base.replace(/\/$/, "") + rec.target;
+}
+
+function curlFor(rec) {
+  const q = (s) => "'" + String(s).replace(/'/g, `'\\''`) + "'";
+  const parts = ["curl -i -X " + rec.method + " " + q(fullURL(rec))];
+  for (const h of rec.request.headers || []) {
+    const n = h.name.toLowerCase();
+    // Host comes from the URL, and curl recomputes the length of whatever body
+    // it is given — sending the recorded values would fight it.
+    if (n === "host" || n === "content-length") continue;
+    parts.push("-H " + q(h.name + ": " + h.value));
+  }
+  if (rec.request.bytes && !rec.request.binary && rec.request.body) {
+    parts.push("--data-raw " + q(rec.request.body));
+  }
+  return parts.join(" \\\n  ");
+}
+
+function renderDetail() {
+  const rec = state.records.get(state.selected);
+  const el = $("detail");
+  if (!rec) {
+    el.innerHTML = '<p class="empty">Select a request to see its headers and body.</p>';
+    return;
+  }
+  const replayable = !rec.request.truncated;
+  el.innerHTML = `
+    <div class="head">
+      <span class="m ${methodClass(rec.method)}">${esc(rec.method)}</span>
+      <span class="url mono">${esc(fullURL(rec))}</span>
+      <span class="actions">
+        <button id="replay" ${replayable ? "" : "disabled title='The body was too large to record in full'"}>Replay request</button>
+        <button id="curl">Copy as cURL</button>
+      </span>
+    </div>
+    <section>
+      <h2>Summary</h2>
+      <dl>
+        <dt>Status</dt><dd class="${statusClass(rec)}">${rec.status ? esc(rec.status + " " + rec.statusText) : (rec.done ? "no response" : "in flight")}</dd>
+        <dt>Started</dt><dd>${clock(rec.started)}</dd>
+        <dt>First byte</dt><dd>${ms(rec.tookMs)}</dd>
+        <dt>Total</dt><dd>${rec.done ? ms(rec.totalMs) : "still open"}</dd>
+        <dt>Protocol</dt><dd>${esc(rec.proto || "—")}</dd>
+        ${rec.error ? `<dt>Error</dt><dd class="s5xx">${esc(rec.error)}</dd>` : ""}
+      </dl>
+    </section>
+    <section><h2>Request headers</h2>${headerList(rec.request.headers)}</section>
+    <section><h2>Request body</h2>${bodyBlock(rec.request)}</section>
+    <section><h2>Response headers</h2>${headerList(rec.response.headers)}</section>
+    <section><h2>Response body</h2>${bodyBlock(rec.response)}</section>`;
+
+  const replay = $("replay");
+  if (replay) replay.onclick = () => doReplay(rec.id, replay);
+  $("curl").onclick = () => copy(curlFor(rec), "cURL command copied");
+}
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+async function copy(text, msg) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(msg);
+    return;
+  } catch (e) {
+    // The clipboard API needs a permission the page may not have. Fall through
+    // to the old selection trick, which needs none.
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  toast(ok ? msg : "Could not copy");
+}
+
+async function doReplay(id, button) {
+  button.disabled = true;
+  button.textContent = "Replaying…";
+  try {
+    const res = await fetch("/api/replay?id=" + id, { method: "POST" });
+    if (!res.ok) throw new Error((await res.text()).trim());
+    const body = await res.json();
+    state.selected = body.id;
+    renderList();
+    renderDetail();
+    toast("Replayed");
+  } catch (e) {
+    toast("Replay failed: " + e.message);
+    button.disabled = false;
+    button.textContent = "Replay request";
+  }
+}
+
+function upsert(rec) {
+  state.records.set(rec.id, rec);
+  // Trimmed to the same window the agent keeps, so a long session doesn't grow
+  // a list the server has already forgotten.
+  const ids = [...state.records.keys()].sort((a, b) => a - b);
+  while (ids.length > 50) state.records.delete(ids.shift());
+  renderList();
+  if (rec.id === state.selected) renderDetail();
+}
+
+async function load() {
+  const res = await fetch("/api/records");
+  const data = await res.json();
+  state.local = data.local;
+  state.publicUrl = data.publicUrl || "";
+  $("local").textContent = data.local;
+  $("public").innerHTML = data.publicUrl ? "public URL <b>" + esc(data.publicUrl) + "</b>" : "";
+  state.records = new Map(data.records.map((r) => [r.id, r]));
+  renderList();
+  renderDetail();
+}
+
+function connect() {
+  const src = new EventSource("/api/events");
+  let opened = false;
+  src.onopen = () => {
+    $("status").textContent = "live";
+    $("status").classList.add("live");
+    // The feed only carries changes from here on, so a *re*connect re-reads
+    // the buffer to pick up what it missed. The first open skips that: the
+    // rows were drawn a moment ago, and replacing them under the pointer
+    // swallows whatever the user was in the middle of clicking.
+    if (opened) load();
+    opened = true;
+  };
+  src.onmessage = (e) => upsert(JSON.parse(e.data));
+  src.onerror = () => {
+    $("status").textContent = "reconnecting";
+    $("status").classList.remove("live");
+  };
+}
+
+$("tbody").addEventListener("click", (e) => {
+  const row = e.target.closest("tr");
+  if (!row) return;
+  state.selected = Number(row.dataset.id);
+  renderList();
+  renderDetail();
+});
+
+$("filter").addEventListener("input", (e) => {
+  state.filter = e.target.value;
+  renderList();
+});
+
+load().then(connect);
+</script>
+</body>
+</html>

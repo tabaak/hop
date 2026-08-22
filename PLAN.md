@@ -71,6 +71,7 @@ cmd/hopd/           server daemon
 internal/proto/     Hello / HelloAck, framing
 internal/server/    registry, ingress handler, control listener
 internal/client/    dial, reconnect, local forward
+internal/inspect/   request capture, local inspector UI
 internal/certs/     certmagic DNS-01 setup
 ```
 
@@ -196,6 +197,47 @@ Known wart: hopd's own server-side log records 200 for an upgraded connection,
 since `ReverseProxy` hijacks and the status recorder never sees the 101. The
 agent-side log reports it correctly.
 
+### M5 — Local request inspector ✅ done
+
+`hop http <port> --inspect` serves a page on `127.0.0.1:4040`: the last 50
+requests through the tunnel, headers and bodies both ways, live over SSE, with
+**Replay request** and **Copy as cURL**.
+
+Capture is a tee (`io.TeeReader`) into a bounded buffer, never a buffer of the
+exchange — the same constraint the request log lives under, for the same
+reason: a streaming response or a WebSocket must not be held back by something
+watching it. Bodies are capped at 64KB per direction, and the record says what
+was dropped rather than pretending it has everything.
+
+What the hub stores are **snapshots**. An exchange writes to its own buffers
+under its own mutex, and hands the browser side an immutable copy; nothing the
+UI reads is written to again. That is what keeps `-race` quiet with a goroutine
+per stream teeing into the same ring buffer.
+
+Each exchange is published twice: once when the response head lands, which is
+when the status is known and the duration means time-to-first-byte, and once at
+close, which for a WebSocket is much later. The UI keys on the record id and
+upserts, so an in-flight request appears immediately and fills in.
+
+Replay dials the local port directly, bypassing the tunnel, and re-sends the
+recorded bytes with `Connection: close` swapped in — and, importantly, **does
+not half-close** the request afterwards. Half-closing is the tidy way to say
+"that's all of it", and Go's `net/http` copes, but Node's HTTP server reads the
+FIN as the client giving up and closes without answering at all: the replay
+came back with no status and an empty response. Go-only tests missed it, so the
+regression test uses a raw listener that aborts on half-close the way Node
+does. A request whose body was truncated is **refused** rather than
+replayed short: its `Content-Length` would no longer match and the local app
+would hang until the deadline.
+
+The listener is loopback, and the handler also **requires a loopback `Host`**.
+Binding 127.0.0.1 alone doesn't stop a public page pointing a rebound name at
+it and reading the answer, and what's in there is cookies and auth headers.
+
+Deliberately not configurable: no port flag, no persistence, no capture rules.
+If 4040 is taken the inspector says so and the tunnel carries on — losing the
+debugging aid is not a reason to lose the tunnel.
+
 ## Decisions
 
 **Separate control port (:7443) rather than ALPN-muxing onto :443.** Simpler.
@@ -273,5 +315,6 @@ loopback honestly.
 
 ## Deferred (not in scope)
 
-Raw TCP tunnels, accounts + Postgres, web dashboard, request inspector/replay,
-custom domains, multi-region.
+Raw TCP tunnels, accounts + Postgres, web dashboard, custom domains,
+multi-region. (The request inspector landed in M5 — as a local page, not a
+hosted dashboard.)

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"hop.vokh.dev/internal/client"
+	"hop.vokh.dev/internal/inspect"
 )
 
 func main() {
@@ -53,6 +54,7 @@ func runHTTP(args []string) {
 		hostHeader = fs.String("host-header", "preserve", "Host sent to the local app: preserve, rewrite, or a literal value")
 		quiet      = fs.Bool("quiet", false, "don't log requests")
 		noColour   = fs.Bool("no-color", false, "disable colour in the request log")
+		inspector  = fs.Bool("inspect", false, "serve the request inspector on http://"+inspect.DefaultAddr)
 		detach     bool
 	)
 	// Registered twice so both spellings work; Go's flag package treats -d and
@@ -99,6 +101,21 @@ func runHTTP(args []string) {
 		cfg.Log = logRequest
 	}
 
+	var hub *inspect.Hub
+	if *inspector {
+		hub = inspect.New(local)
+		addr, err := hub.Start(inspect.DefaultAddr)
+		if err != nil {
+			// Not fatal. Something else holding 4040 is a reason to lose the
+			// inspector, not the tunnel the user actually asked for.
+			fmt.Fprintf(os.Stderr, "hop: inspector not started: %v\n", err)
+			hub = nil
+		} else {
+			fmt.Fprintf(os.Stderr, "\n  inspector  →  http://%s\n", addr)
+			cfg.Tap = tap{hub}
+		}
+	}
+
 	// Recorded whether or not this agent is detached, so `hop ps` can mark the
 	// tunnels this machine is serving and `hop stop` can reach them. A tunnel
 	// started in a terminal is no harder to stop by name for it.
@@ -128,6 +145,11 @@ func runHTTP(args []string) {
 	everUp := false
 	cfg.OnUp = func(sub, url string) {
 		everUp = true
+		if hub != nil {
+			// Set on every reconnect, since the assigned name — and so the URL
+			// the inspector puts in a cURL command — can change.
+			hub.SetPublicURL(url)
+		}
 		if sf == nil {
 			return
 		}
@@ -195,6 +217,18 @@ func runHTTP(args []string) {
 	}
 }
 
+// tap adapts the inspector to the agent's Tap interface. It exists for one
+// line: a nil *Exchange has to become a nil Capture, since an interface
+// holding a nil pointer is not itself nil and the agent tests for nil.
+type tap struct{ hub *inspect.Hub }
+
+func (t tap) Begin(head []byte) client.Capture {
+	if ex := t.hub.Begin(head); ex != nil {
+		return ex
+	}
+	return nil
+}
+
 // resolveHostHeader maps the flag onto the Host the local app should see.
 // "rewrite" is the common case: Vite and a few other dev servers reject
 // requests whose Host they don't recognise, and pointing it at the local
@@ -226,6 +260,7 @@ http flags:
   --local-host <ip>  local host to forward to (default 127.0.0.1)
   --host-header <v>  Host sent to the local app: preserve (default), rewrite,
                      or a literal value
+  --inspect          serve the request inspector on http://127.0.0.1:4040
   --quiet            don't log requests
 
 ps flags:

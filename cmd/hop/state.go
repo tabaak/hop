@@ -86,33 +86,52 @@ func socketPathFor(pid int) (string, error) {
 	return filepath.Join(dir, strconv.Itoa(pid)+".sock"), nil
 }
 
-// pruneLogs deletes the logs of agents that are no longer running and haven't
-// been touched in maxAge. Without it the directory grows for the life of the
-// machine: every detached start leaves a file, and nothing else ever removes
-// one. Logs of live agents are kept whatever their age.
-func pruneLogs(maxAge time.Duration) {
-	dir, err := subDir("log")
-	if err != nil {
-		return
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-
+// pruneRuntime deletes the files agents leave behind: the log of a detached
+// run, and the unix socket its inspector listened on. Neither is removed by
+// the agent itself in every case — a killed process removes nothing, and the
+// kernel does not reap unix sockets — so without this the directories grow for
+// the life of the machine.
+//
+// A file is swept only if no live agent owns its PID and it has not been
+// touched inside its own window. The two windows are not the same length and
+// are not measuring the same thing: a log is kept so it can still be read, so
+// it is kept for as long as reading it is plausible, while a socket is kept
+// only long enough that a starting agent cannot have its own socket swept
+// between listening on it and recording itself.
+func pruneRuntime(logAge, socketAge time.Duration) {
 	alive := make(map[int]bool)
 	live, _ := liveStates()
 	for _, s := range live {
 		alive[s.PID] = true
 	}
 
+	logs, err := subDir("log")
+	if err == nil {
+		pruneByPID(logs, ".log", alive, logAge)
+	}
+	// Sockets live in run/ alongside the state records, which are swept by
+	// liveStates on their lock instead — a record's owner is provably gone or
+	// provably alive, so age never comes into it.
+	run, err := subDir("run")
+	if err == nil {
+		pruneByPID(run, ".sock", alive, socketAge)
+	}
+}
+
+// pruneByPID removes <pid><ext> files in dir whose PID is not alive and whose
+// mtime is older than maxAge.
+func pruneByPID(dir, ext string, alive map[int]bool, maxAge time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
 	cutoff := time.Now().Add(-maxAge)
 	for _, e := range entries {
 		name := e.Name()
-		if !strings.HasSuffix(name, ".log") {
+		if !strings.HasSuffix(name, ext) {
 			continue
 		}
-		pid, err := strconv.Atoi(strings.TrimSuffix(name, ".log"))
+		pid, err := strconv.Atoi(strings.TrimSuffix(name, ext))
 		if err != nil || alive[pid] {
 			continue
 		}

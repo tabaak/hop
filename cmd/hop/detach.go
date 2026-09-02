@@ -29,6 +29,19 @@ const detachTimeout = 30 * time.Second
 // directory doesn't accumulate for the life of the machine.
 const logRetention = 14 * 24 * time.Hour
 
+// socketGrace is the equivalent for an agent's inspector socket, and is short
+// because a socket is not kept for its contents — it has none. Once its agent
+// is gone the file is unreachable as well as empty: `hop inspect` finds a
+// socket only by first finding its agent in liveStates, so one with no live
+// owner can never be opened again by anything.
+//
+// What the delay guards is a starting agent, not a finished one. An agent
+// listens on its socket a few statements before it records itself, so for that
+// window it owns a socket while looking dead to a concurrent sweep. A minute
+// is five orders of magnitude more than that gap, and both sides read the same
+// clock, so there is no skew to pad for either.
+const socketGrace = time.Minute
+
 // spawnDetached re-executes this binary in its own session and returns once the
 // child has a tunnel, so the shell prompt comes back with the URL already
 // printed and a failed handshake is still reported as a failure. Starting the
@@ -42,10 +55,11 @@ func spawnDetached() {
 	if err != nil {
 		fatal("%v", err)
 	}
-	// Nothing else ever removes these, and every detached start leaves one.
+	// Nothing else ever removes the logs and inspector sockets agents leave
+	// behind, and every detached start adds one of each.
 	// Done here rather than on a timer because this is the only moment the tool
 	// knows it is about to add to the pile.
-	pruneLogs(logRetention)
+	pruneRuntime(logRetention, socketGrace)
 
 	// The log is named for the child's PID, which doesn't exist until it does.
 	// Opened under a temporary name and renamed after the fork: the child's

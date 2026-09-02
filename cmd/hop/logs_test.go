@@ -104,7 +104,7 @@ func TestPruneLogsKeepsLiveAndRecentOnes(t *testing.T) {
 	old := write("424242.log", 30*24*time.Hour)
 	recent := write("424243.log", time.Hour)
 
-	pruneLogs(logRetention)
+	pruneRuntime(logRetention, socketGrace)
 
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
 		t.Errorf("old log of a finished agent survived: %v", err)
@@ -116,6 +116,110 @@ func TestPruneLogsKeepsLiveAndRecentOnes(t *testing.T) {
 		t.Errorf("log of a running agent was pruned despite its age: %v", err)
 	}
 	_ = home
+}
+
+// An agent that is killed leaves its inspector socket behind: unix sockets are
+// not reaped by the kernel, and the signal handler that removes the state
+// record never runs on SIGKILL. They are swept on the same terms as logs.
+func TestPruneRuntimeSweepsOrphanedSockets(t *testing.T) {
+	tempHome(t)
+
+	sf, err := holdState(State{PID: os.Getpid(), Subdomain: "live"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sf.release()
+
+	dir, err := subDir("run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Written as plain files rather than real sockets: prune reads the name and
+	// the mtime, and a listener would need a process behind it to be realistic.
+	write := func(name string, age time.Duration) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	mine := write(filepath.Base(mustSockPath(t, os.Getpid())), 90*24*time.Hour)
+	// An hour is ancient for a socket, where it is well inside a log's window:
+	// the two are swept on their own clocks, and this test would pass on the
+	// log's by accident if they shared one.
+	old := write("424242.sock", time.Hour)
+	// Young enough to be a socket that was created between a starting agent's
+	// listen and the record that marks it alive.
+	recent := write("424243.sock", time.Second)
+	// The record of a live agent must survive a sweep aimed at sockets.
+	record := statePath(dir, os.Getpid())
+
+	pruneRuntime(logRetention, socketGrace)
+
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("orphaned socket survived: %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("recent socket was pruned: %v", err)
+	}
+	if _, err := os.Stat(mine); err != nil {
+		t.Errorf("socket of a running agent was pruned despite its age: %v", err)
+	}
+	if _, err := os.Stat(record); err != nil {
+		t.Errorf("state record of a running agent was pruned: %v", err)
+	}
+}
+
+// The clearest statement of why the two windows differ: one dead agent, one
+// log and one socket, the same age. The log is still worth reading and the
+// socket has been unreachable since the moment its agent died.
+func TestPruneRuntimeKeepsALogWhoseSocketIsAlreadyGone(t *testing.T) {
+	tempHome(t)
+
+	age := time.Now().Add(-time.Hour)
+	write := func(dir, name string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, age, age); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	logs, err := subDir("log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := subDir("run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := write(logs, "424242.log")
+	sock := write(run, "424242.sock")
+
+	pruneRuntime(logRetention, socketGrace)
+
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Errorf("socket survived an hour, well past its grace: %v", err)
+	}
+	if _, err := os.Stat(log); err != nil {
+		t.Errorf("log of the same agent was swept on the socket's clock: %v", err)
+	}
+}
+
+func mustSockPath(t *testing.T, pid int) string {
+	t.Helper()
+	p, err := socketPathFor(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func TestPastLogsListsOnlyFinishedAgents(t *testing.T) {

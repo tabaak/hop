@@ -20,6 +20,30 @@ func tempHome(t *testing.T) string {
 	return home
 }
 
+// startHolder runs one of the helper tests below as a subprocess that outlives
+// the call, and registers its termination with t.Cleanup rather than defer.
+//
+// The distinction matters: a defer is skipped when a helper called from this
+// test calls t.Fatal, and skipped entirely if the test panics after the spawn —
+// both of which leave a process running with a lock on a state file, which is
+// how a test leaks an agent that is still there days later. t.Cleanup runs in
+// every one of those cases. Kill and not SIGTERM because the subprocess is a
+// test binary with no handler; Wait because an unreaped child is a zombie for
+// as long as the test binary lives.
+func startHolder(t *testing.T, run, home string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^"+run+"$")
+	cmd.Env = append(os.Environ(), "HOP_TEST_HOLDER=1", "HOME="+home)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+	})
+	return cmd
+}
+
 func TestHoldStateRecordsAndReleases(t *testing.T) {
 	tempHome(t)
 
@@ -155,15 +179,7 @@ func TestHelperHoldsState(t *testing.T) {
 func TestLiveStatesKeepsHeldRecords(t *testing.T) {
 	home := tempHome(t)
 
-	holder := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsStateAndWaits$")
-	holder.Env = append(os.Environ(), "HOP_TEST_HOLDER=1", "HOME="+home)
-	if err := holder.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		holder.Process.Kill()
-		holder.Wait()
-	}()
+	holder := startHolder(t, "TestHelperHoldsStateAndWaits", home)
 
 	// The subprocess needs a moment to write its record.
 	var live []State
@@ -190,7 +206,19 @@ func TestHelperHoldsStateAndWaits(t *testing.T) {
 	if _, err := holdState(State{PID: os.Getpid(), Subdomain: "held", Local: "127.0.0.1:1"}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(30 * time.Second) // killed by the parent
+	// Held until the parent kills it. The wait is not a plain sleep: if the
+	// test binary dies without running its cleanups — a `go test` timeout, a
+	// panic, a SIGKILL — nobody kills this process, and a leaked agent holding
+	// a state lock is exactly the failure this package is meant to detect.
+	// Being reparented to init means the parent is gone, so stop.
+	parent := os.Getppid()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if os.Getppid() != parent {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // waitForState is how `-d` learns the handshake worked, so it must not report

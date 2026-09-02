@@ -183,8 +183,20 @@ func (h *Hub) subscribe() (<-chan []byte, func()) {
 
 // publish stores the snapshot and pushes it to every connected browser. The
 // send is non-blocking on purpose — see the note on subBuffer.
+//
+// With no browsers attached it stops after storing. Capture runs whether or
+// not anyone is watching, and encoding every record to feed nobody would put
+// a per-request cost on the data path. A subscriber arriving in the same
+// instant misses one event, which it makes up from /api/records.
 func (h *Hub) publish(rec Record) {
 	h.store(rec)
+
+	h.mu.Lock()
+	watched := len(h.subs) > 0
+	h.mu.Unlock()
+	if !watched {
+		return
+	}
 
 	payload, err := json.Marshal(rec)
 	if err != nil {

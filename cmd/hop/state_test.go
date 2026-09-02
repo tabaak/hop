@@ -116,6 +116,13 @@ func TestLiveStatesSweepsRecordsOfDeadProcesses(t *testing.T) {
 		t.Fatalf("holder did not leave a record: %v", err)
 	}
 
+	// A dead agent also leaves its inspector socket behind; swept with the
+	// record it belongs to.
+	sock := filepath.Join(home, ".hop", "run", "424242.sock")
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	live, err := liveStates()
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +132,9 @@ func TestLiveStatesSweepsRecordsOfDeadProcesses(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("stale record still on disk: %v", err)
+	}
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Errorf("stale inspector socket still on disk: %v", err)
 	}
 }
 
@@ -240,20 +250,70 @@ func TestWaitForStateTimesOut(t *testing.T) {
 	}
 }
 
-// findState accepts a PID as well as a name, which is the only handle a tunnel
-// has before the server has assigned it one.
+// findState accepts a name, a PID, or the tunnel's local port. Names win;
+// numbers match PIDs and ports together; a number that fits more than one
+// tunnel comes back as the full list of matches rather than a guess.
 func TestFindState(t *testing.T) {
 	live := []State{
-		{PID: 11, Subdomain: "myapp"},
-		{PID: 22, Subdomain: ""},
+		{PID: 11, Subdomain: "myapp", Local: "127.0.0.1:8080"},
+		{PID: 22, Subdomain: "", Local: "localhost:3000"},
+		{PID: 33, Subdomain: "other", Local: "[::1]:8080"},
 	}
-	if s, ok := findState(live, "myapp"); !ok || s.PID != 11 {
-		t.Errorf("by name = (%+v, %v), want pid 11", s, ok)
+	if m, ok := findState(live, "myapp"); !ok || len(m) != 1 || m[0].PID != 11 {
+		t.Errorf("by name = (%+v, %v), want pid 11 alone", m, ok)
 	}
-	if s, ok := findState(live, strconv.Itoa(22)); !ok || s.PID != 22 {
-		t.Errorf("by pid = (%+v, %v), want pid 22", s, ok)
+	if m, ok := findState(live, strconv.Itoa(22)); !ok || len(m) != 1 || m[0].PID != 22 {
+		t.Errorf("by pid = (%+v, %v), want pid 22 alone", m, ok)
 	}
-	if _, ok := findState(live, "nope"); ok {
-		t.Error("found a tunnel that isn't running")
+	// The port works whichever host form it was recorded in.
+	if m, ok := findState(live, "3000"); !ok || len(m) != 1 || m[0].PID != 22 {
+		t.Errorf("by unique port = (%+v, %v), want pid 22", m, ok)
+	}
+	m, ok := findState(live, "8080")
+	if !ok || len(m) != 2 {
+		t.Fatalf("port shared by two tunnels = (%+v, %v), want both listed", m, ok)
+	}
+	got := map[int]bool{m[0].PID: true, m[1].PID: true}
+	if !got[11] || !got[33] {
+		t.Errorf("shared-port matches = %v, want pids 11 and 33", got)
+	}
+	for _, absent := range []string{"nope", "9999", "0", "-8080"} {
+		if _, ok := findState(live, absent); ok {
+			t.Errorf("%q resolved to something", absent)
+		}
+	}
+}
+
+// A PID and a port are indistinguishable until checked, so "6060" with a
+// tunnel of pid 6060 and another forwarding :6060 must come back as both
+// records for the caller to refuse choosing between them — but one record
+// that is both by itself still resolves on its own.
+func TestFindStatePidAndPortCollisions(t *testing.T) {
+	cross := []State{
+		{PID: 50, Subdomain: "alpha", Local: "127.0.0.1:6060"},
+		{PID: 6060, Subdomain: "beta", Local: "127.0.0.1:5050"},
+	}
+	m, ok := findState(cross, "6060")
+	if !ok || len(m) != 2 {
+		t.Errorf("a pid matching one tunnel and a port matching another = (%+v, %v), want both listed", m, ok)
+	}
+
+	sameRecord := []State{{PID: 6060, Subdomain: "delta", Local: "127.0.0.1:6060"}}
+	if m, ok := findState(sameRecord, "6060"); !ok || len(m) != 1 {
+		t.Errorf("one record matching by pid and port = (%+v, %v), want it once", m, ok)
+	}
+}
+
+// Local came off a command line and is parsed, not trusted: a record whose
+// address doesn't parse simply matches no port.
+func TestFindStateIgnoresUnparseableLocal(t *testing.T) {
+	live := []State{
+		{PID: 90, Subdomain: "weird", Local: "127.0.0.1:http"},
+		{PID: 91, Subdomain: "empty"},
+	}
+	for _, ref := range []string{"http", "80"} {
+		if _, ok := findState(live, ref); ok {
+			t.Errorf("%q matched an unparseable local address", ref)
+		}
 	}
 }

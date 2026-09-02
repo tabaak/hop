@@ -75,12 +75,17 @@ func runLog(args []string) {
 	followFile(f)
 }
 
-// resolveLog turns a name or PID into a log file, or explains why there isn't
-// one and exits.
+// resolveLog turns a name, PID or local port into a log file, or explains why
+// there isn't one and exits.
 func resolveLog(want string) string {
 	live, _ := liveStates()
 
-	if s, ok := findState(live, want); ok {
+	if matches, ok := findState(live, want); ok {
+		if len(matches) > 1 {
+			ambiguousRef(want, matches)
+			os.Exit(1)
+		}
+		s := matches[0]
 		if s.Log == "" {
 			// Running, but in a terminal. Saying so is more useful than "no log
 			// file", which reads as something being broken.

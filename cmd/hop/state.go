@@ -75,6 +75,17 @@ func logPathFor(pid int) (string, error) {
 	return filepath.Join(dir, strconv.Itoa(pid)+".log"), nil
 }
 
+// socketPathFor is where an agent serves its inspector over a private unix
+// socket, which is how `hop inspect <name>` reaches a tunnel that was started
+// without --inspect. Named for the PID for the same reason the log is.
+func socketPathFor(pid int) (string, error) {
+	dir, err := subDir("run")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, strconv.Itoa(pid)+".sock"), nil
+}
+
 // pruneLogs deletes the logs of agents that are no longer running and haven't
 // been touched in maxAge. Without it the directory grows for the life of the
 // machine: every detached start leaves a file, and nothing else ever removes
@@ -192,6 +203,15 @@ func liveStates() ([]State, error) {
 		}
 		if !held {
 			os.Remove(path)
+			// The agent's inspector socket outlives it the same way: unix
+			// sockets are not cleaned up by the kernel, and a dead agent has
+			// nobody to remove its file. Swept here rather than on exit
+			// because this runs however the process died.
+			if pid, err := strconv.Atoi(strings.TrimSuffix(e.Name(), ".json")); err == nil {
+				if sock, err := socketPathFor(pid); err == nil {
+					os.Remove(sock)
+				}
+			}
 			continue
 		}
 		live = append(live, s)

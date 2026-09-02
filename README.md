@@ -15,9 +15,16 @@ Three subcommands. Anything else prints usage and exits 2.
 ```sh
 hop http <port> [flags]   # open a tunnel
 hop ps [flags]            # list the tunnels currently up (aliases: ls, status)
-hop stop <name>...        # stop tunnels running on this machine
-hop log <name>            # read a detached tunnel's output (alias: logs)
+hop stop <tunnel>...      # stop tunnels running on this machine
+hop log <tunnel>          # read a detached tunnel's output (alias: logs)
+hop inspect <tunnel>      # open the request inspector for a running tunnel
 ```
+
+A `<tunnel>` is named by its subdomain, its agent's PID, or the local port it
+serves — `hop stop 8080` stops whatever is forwarding your `:8080`, which is
+usually the one fact you still remember about a tunnel started an hour ago. A
+number that fits more than one tunnel (two subs sharing a port, say) lists
+them rather than picking.
 
 | Flag                  | Default                                    | Applies to |
 |-----------------------|--------------------------------------------|------------|
@@ -25,7 +32,8 @@ hop log <name>            # read a detached tunnel's output (alias: logs)
 | `-d`, `--detach`      | off; runs in the background                | `http`     |
 | `--local-host <ip>`   | `127.0.0.1`                                | `http`     |
 | `--host-header <v>`   | `preserve`; or `rewrite`, or a literal value | `http`   |
-| `--inspect`           | off; serves the request inspector on `127.0.0.1:4040` | `http` |
+| `--inspect`           | off; serves the request inspector on `127.0.0.1:4040` from startup | `http` |
+| `--no-open`           | off; `hop inspect` opens the page in your browser | `inspect` |
 | `--quiet`             | off; suppresses the request log            | `http`     |
 | `--json`              | off; prints the listing as JSON            | `ps`       |
 | `-a`, `--all`         | off; stops every tunnel on this machine    | `stop`     |
@@ -111,14 +119,29 @@ navigated away.
 
 ### The request inspector
 
-`--inspect` serves a page on `http://127.0.0.1:4040` showing the last 50
-requests through the tunnel: headers and bodies both ways, status, time to
-first byte, and total duration. Methods are badged and statuses coloured on the
-same scheme as the terminal log — green for `GET` and 2xx, blue for `POST`,
-amber for `PUT`/`PATCH` and 4xx, red for `DELETE` and 5xx, purple for anything
-else and for a 101 upgrade, `HEAD` and `OPTIONS` dimmed — so a request looks
-the same in both places. The feed is live over server-sent events, so
-requests appear as they arrive rather than on a refresh.
+Every tunnel records its requests as they pass — a bounded tee into the last
+50, in memory, on this machine only. `--inspect` serves that record as a page
+on `http://127.0.0.1:4040` from the moment the tunnel starts; `hop inspect`
+opens it for a tunnel that is already running, by name, PID or local port:
+
+```sh
+hop http 3000 --inspect     # page up from startup
+hop inspect myapp           # or attach to a running tunnel
+hop inspect 55899           # PIDs work too
+hop inspect 3000            # so does the port the tunnel forwards
+```
+
+The page shows headers and bodies both ways, status, time to first byte, and
+total duration. Methods are badged and statuses coloured on the same scheme as
+the terminal log — green for `GET` and 2xx, blue for `POST`, amber for
+`PUT`/`PATCH` and 4xx, red for `DELETE` and 5xx, purple for anything else and
+for a 101 upgrade, `HEAD` and `OPTIONS` dimmed — so a request looks the same in
+both places. The feed is live over server-sent events, so requests appear as
+they arrive rather than on a refresh.
+
+Because capture runs whether or not anyone is looking, an inspector attached
+afterwards still shows the requests you missed — which is usually exactly why
+you are opening it.
 
 ```sh
 hop http 3000 --inspect
@@ -127,6 +150,13 @@ hop http 3000 --inspect
 #
 #   https://myapp.hop.vokh.dev  →  http://127.0.0.1:3000
 ```
+
+`hop inspect myapp` prints the same kind of banner, opens the page in your
+browser (`$BROWSER` picks which; `--no-open` skips it), and stays in the
+foreground, like `hop log -f`: Ctrl-C ends the page (the tunnel carries on),
+and so does the tunnel ending — its records live in the agent's memory, so an
+exited tunnel has nothing left to show. One page per machine, since 4040 is
+fixed: a second `--inspect` or `hop inspect` says so rather than stealing it.
 
 Two things you can do with a request once you have it:
 
@@ -156,8 +186,13 @@ Worth knowing:
   can't read the inspector through a rebound DNS name. Everything it holds —
   cookies, auth headers, whole bodies — is exactly what must not leave the
   machine.
-- **If something already holds 4040**, the inspector says so and the tunnel
-  carries on without it.
+- **How `hop inspect` reaches a running agent** without either of them
+  listening on an extra port: every agent serves the same inspector surface on
+  a private unix socket under `~/.hop/run/`, reachable only by your user, and
+  the command binds `4040` itself and proxies to it. The agent's loopback-Host
+  guard survives the hop, so the page is no more exposed than `--inspect`'s.
+- **If something already holds 4040**, both paths say so and the tunnel
+  carries on without the page.
 
 ### Running in the background
 
@@ -170,7 +205,8 @@ hop http 3000 --sub myapp -d
 ```
   https://myapp.hop.vokh.dev  →  http://127.0.0.1:3000
 
-  detached, pid 55899. hop stop myapp to stop it, ~/.hop/log/55899.log for the request log.
+  detached, pid 55899. hop log myapp for the request log,
+  hop inspect myapp to watch requests in a browser, hop stop myapp to end it.
 ```
 
 The prompt returns only once the tunnel is **up**, not once the process has
@@ -219,7 +255,8 @@ detached tunnel starts. Nothing else would ever remove them.
 ### Stopping tunnels
 
 ```sh
-hop stop myapp        # by name, or by PID
+hop stop myapp        # by name, PID, or the local port it forwards
+hop stop 8080         # "stop whatever is serving my :8080"
 hop stop web docs     # several at once
 hop stop --all        # or -a
 ```
@@ -512,8 +549,8 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
 - **The agent's token must be in the environment or on the command line.** The
   server side now has a proper token file; the client side still means
   `HOP_TOKEN` in your shell profile. A `~/.hop.yaml` is the open M3 item.
-- **The inspector is not configurable.** `--inspect` or nothing: no port flag,
-  no persistence, no filter rules beyond the search box.
+- **The inspector is not configurable.** `--inspect`, `hop inspect` or nothing:
+  no port flag, no persistence, no filter rules beyond the search box.
 - **hopd's own server-side log reports 200 for upgraded connections.** The
   agent-side log gets this right; the server's status recorder doesn't see the
   101 because ReverseProxy hijacks the connection.
@@ -527,6 +564,8 @@ go test -race ./...
 Covers the registry's claim/eviction logic, Host parsing, the `hop ps` listing
 (including that it authenticates and claims no name of its own), the
 inspector's ring buffer, capture and replay — including that it doesn't stall
-an upgraded connection — and full end-to-end tunnels in both plaintext and TLS
+an upgraded connection — the socket-and-proxy path `hop inspect` serves a page
+through (records, live events, replay, and the loopback guard surviving the
+hop), and full end-to-end tunnels in both plaintext and TLS
 modes. The TLS test uses a throwaway CA rather
 than skipping verification, so a broken chain fails the test.

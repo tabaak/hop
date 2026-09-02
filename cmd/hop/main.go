@@ -36,6 +36,8 @@ func main() {
 		runStop(args[1:])
 	case "log", "logs":
 		runLog(args[1:])
+	case "inspect":
+		runInspect(args[1:])
 	default:
 		usage()
 		os.Exit(2)
@@ -101,18 +103,28 @@ func runHTTP(args []string) {
 		cfg.Log = logRequest
 	}
 
-	var hub *inspect.Hub
+	// Capture is always on. The inspector can be attached to a running tunnel
+	// with `hop inspect <name>`, and a feed that only starts when you open it
+	// would miss exactly the requests you opened it to see — the webhook that
+	// arrived once, before anything was watching. The cost is bounded: fifty
+	// records, bodies capped at 64KB each way, and nothing leaves the machine.
+	hub := inspect.New(local)
+	cfg.Tap = tap{hub}
+
+	if p, err := socketPathFor(os.Getpid()); err != nil {
+		fmt.Fprintf(os.Stderr, "hop: `hop inspect` will not reach this tunnel: %v\n", err)
+	} else if err := hub.ListenUnix(p); err != nil {
+		fmt.Fprintf(os.Stderr, "hop: inspector socket not started: %v\n", err)
+	}
+
 	if *inspector {
-		hub = inspect.New(local)
 		addr, err := hub.Start(inspect.DefaultAddr)
 		if err != nil {
 			// Not fatal. Something else holding 4040 is a reason to lose the
 			// inspector, not the tunnel the user actually asked for.
 			fmt.Fprintf(os.Stderr, "hop: inspector not started: %v\n", err)
-			hub = nil
 		} else {
 			fmt.Fprintf(os.Stderr, "\n  inspector  →  http://%s\n", addr)
-			cfg.Tap = tap{hub}
 		}
 	}
 
@@ -145,11 +157,9 @@ func runHTTP(args []string) {
 	everUp := false
 	cfg.OnUp = func(sub, url string) {
 		everUp = true
-		if hub != nil {
-			// Set on every reconnect, since the assigned name — and so the URL
-			// the inspector puts in a cURL command — can change.
-			hub.SetPublicURL(url)
-		}
+		// Set on every reconnect, since the assigned name — and so the URL
+		// the inspector puts in a cURL command — can change.
+		hub.SetPublicURL(url)
 		if sf == nil {
 			return
 		}
@@ -250,9 +260,12 @@ func usage() {
 usage:
   hop http <port> [flags]   open a tunnel to a local port
   hop ps [flags]            list the tunnels currently up (also: ls, status)
-  hop stop <name>...        stop a tunnel running on this machine
+  hop stop <tunnel>...      stop a tunnel running on this machine
   hop stop --all            stop all of them
-  hop log <name> [-f]       show a detached tunnel's output (also: logs)
+  hop log <tunnel> [-f]     show a detached tunnel's output (also: logs)
+  hop inspect <tunnel>      serve the request inspector for a running tunnel
+
+  <tunnel> is its subdomain, its agent's pid, or the local port it serves.
 
 http flags:
   --sub <name>       requested subdomain (default: server picks one)
@@ -272,6 +285,10 @@ stop flags:
 log flags:
   -n <count>         how many lines to show (default 50)
   -f, --follow       keep printing as the agent writes
+
+inspect flags:
+  --no-open          don't open the inspector page in a browser
+                     ($BROWSER picks which one; default is the system's)
 
 common flags:
   --server <addr>    control address (default $HOP_SERVER or hop.vokh.dev:7443)

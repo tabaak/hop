@@ -3,7 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -51,7 +53,7 @@ func runStop(args []string) {
 	if !all {
 		targets = nil
 		for _, name := range names {
-			s, ok := findState(live, name)
+			matches, ok := findState(live, name)
 			if !ok {
 				fmt.Fprintf(os.Stderr, "hop: no tunnel named %q is running on this machine\n", name)
 				listRunning(live)
@@ -61,7 +63,11 @@ func runStop(args []string) {
 				fmt.Fprintf(os.Stderr, "\n  `hop ps` lists tunnels from every device; only this machine's can be stopped here.\n")
 				os.Exit(1)
 			}
-			targets = append(targets, s)
+			if len(matches) > 1 {
+				ambiguousRef(name, matches)
+				os.Exit(1)
+			}
+			targets = append(targets, matches[0])
 		}
 	}
 
@@ -130,20 +136,62 @@ func gone(pid int, d time.Duration) bool {
 	return false
 }
 
-func findState(live []State, name string) (State, bool) {
+// findState resolves the way this command names a tunnel: its subdomain, its
+// agent's PID, or — usually the only thing remembered about a tunnel started
+// an hour ago — the local port it forwards. "Stop whatever is serving my
+// :8080" needs no name lookup first.
+//
+// An exact subdomain wins and can never be ambiguous. A number matches PIDs
+// and ports together, because until checked they are indistinguishable: a PID
+// of 3000 and a port of 3000 are equally plausible things to have typed. When
+// that fits more than one tunnel — two subs sharing a port, or such a
+// collision across records — every match comes back whole rather than guessed,
+// since silently acting on the wrong one is worse than refusing.
+func findState(live []State, ref string) ([]State, bool) {
 	for _, s := range live {
-		if s.Subdomain == name {
-			return s, true
+		if s.Subdomain == ref {
+			return []State{s}, true // an exact name resolves to exactly one
 		}
 	}
-	// A PID works too, which is the only handle a tunnel has before its
-	// handshake completes.
+	n, err := strconv.Atoi(ref)
+	if err != nil || n <= 0 {
+		return nil, false
+	}
+	var hits []State
 	for _, s := range live {
-		if fmt.Sprint(s.PID) == name {
-			return s, true
+		if s.PID == n || localPort(s) == n {
+			hits = append(hits, s)
 		}
 	}
-	return State{}, false
+	return hits, len(hits) > 0
+}
+
+// localPort reads the port half of a record's Local address. Local was typed
+// on a command line once, so it may not parse; such a record simply matches no
+// port instead of being trusted.
+func localPort(s State) int {
+	if _, port, err := net.SplitHostPort(s.Local); err == nil {
+		if n, err := strconv.Atoi(port); err == nil && n > 0 && n < 65536 {
+			return n
+		}
+	}
+	return 0
+}
+
+// ambiguousRef explains that a numeric reference fit several tunnels and ends
+// the command. Naming them is the whole answer: the user reached for the one
+// fact they still had, and the names in the list are what turns it into a
+// precise handle.
+func ambiguousRef(ref string, matches []State) {
+	fmt.Fprintf(os.Stderr, "hop: %q matches more than one tunnel on this machine:\n\n", ref)
+	w := 0
+	for _, s := range matches {
+		w = max(w, len(displayName(s)))
+	}
+	for _, s := range matches {
+		fmt.Fprintf(os.Stderr, "  %s\n", describe(s, w))
+	}
+	fmt.Fprintf(os.Stderr, "\n  Pick one by name or pid.\n")
 }
 
 // displayName is the tunnel's name, or a stand-in for one that hasn't been

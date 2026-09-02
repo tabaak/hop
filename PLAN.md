@@ -238,6 +238,25 @@ Deliberately not configurable: no port flag, no persistence, no capture rules.
 If 4040 is taken the inspector says so and the tunnel carries on — losing the
 debugging aid is not a reason to lose the tunnel.
 
+**Attaching later (`hop inspect <name|pid>`).** `--inspect` had to be chosen at
+start-up, which is the wrong moment: you open an inspector because something
+already went wrong. So every agent now captures from birth and serves the same
+handler on `~/.hop/run/<pid>.sock` — a unix socket rather than a TCP port,
+since nothing should be listening on the network until someone asks for the
+page, and the kernel enforces same-user access for free. The command binds 4040
+itself and reverse-proxies over the socket with flushing enabled (the feed is
+SSE), staying foreground like `hop log -f`; preserving the browser's Host keeps
+the loopback guard meaningful at the far end. Capture-always costs one bounded
+ring of fifty records and skips event encoding entirely while no browser is
+subscribed — the alternative, capture-on-attach, would miss precisely the
+requests worth inspecting.
+
+Attaching also opens the page in the browser: the command exists to *look*,
+and making you copy the URL out of its own banner was one step of ceremony for
+every use. `$BROWSER` overrides the platform opener, `--no-open` opts out, and
+a failure to launch (headless box, bare SSH session) is silent by design — the
+URL is in the banner either way.
+
 ## Decisions
 
 **Separate control port (:7443) rather than ALPN-muxing onto :443.** Simpler.
@@ -279,6 +298,17 @@ the number belongs to something else and `hop stop` signals a stranger.
 Tracking foreground agents too is deliberate. `hop stop myapp` failing because
 that tunnel happened to be started in a terminal would be a distinction the user
 never made.
+
+**A tunnel can be named by its local port.** The subdomain is what the server
+hands out, the PID is what the process table knows — and neither is what you
+remember about a tunnel started an hour ago. You remember that it was serving
+`:8080`. So every command that takes a tunnel (`stop`, `log`, `inspect`)
+resolves names, then PIDs, then ports: a number matches PIDs and ports
+together, since until checked they are indistinguishable, and one record
+matching both counts once. When a reference fits several tunnels — two subs
+sharing a port, or a PID colliding with one — every match is listed and the
+command refuses to pick; silently stopping the wrong tunnel is the failure mode
+that must not happen quietly.
 
 **The agent tells the server what it forwards to, and the server sanitises it.**
 `Local` is carried in the handshake purely so a listing can show it; nothing

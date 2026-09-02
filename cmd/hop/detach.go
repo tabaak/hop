@@ -92,9 +92,10 @@ func spawnDetached() {
 	}
 
 	fmt.Printf("\n  %s  →  http://%s\n\n", s.URL, s.Local)
-	fmt.Printf("  detached, pid %d. %s for the request log, %s to end it.\n\n",
+	fmt.Printf("  detached, pid %d. %s for the request log,\n  %s to watch requests in a browser, %s to end it.\n\n",
 		pid,
 		paint("hop log "+s.Subdomain, cyan),
+		paint("hop inspect "+s.Subdomain, cyan),
 		paint("hop stop "+s.Subdomain, cyan),
 	)
 }

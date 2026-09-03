@@ -111,6 +111,11 @@ func runHTTP(args []string) {
 	hub := inspect.New(local)
 	cfg.Tap = tap{hub}
 
+	// Held across reconnects, and pointed at whichever session is live, so a
+	// signal arriving at any moment can say goodbye on the right one.
+	farewell := &client.Farewell{}
+	cfg.Farewell = farewell
+
 	if p, err := socketPathFor(os.Getpid()); err != nil {
 		fmt.Fprintf(os.Stderr, "hop: `hop inspect` will not reach this tunnel: %v\n", err)
 	} else if err := hub.ListenUnix(p); err != nil {
@@ -172,7 +177,7 @@ func runHTTP(args []string) {
 	// every deferred call and leave the record behind. The lock would still
 	// mark it dead, but a file that deletes itself is tidier than one that
 	// waits to be reaped.
-	cleanupOnSignal(sf)
+	stopped := cleanupOnSignal(sf, farewell)
 
 	// Reconnect with backoff, because a laptop lid closing shouldn't end the
 	// session. A refusal is terminal: retrying a bad token or a name someone
@@ -188,6 +193,18 @@ func runHTTP(args []string) {
 		if res.Subdomain != "" {
 			cfg.Subdomain = res.Subdomain
 		}
+		// A goodbye has been sent, so this stop was deliberate: don't dial
+		// again and re-claim the name that was just handed back.
+		//
+		// Waiting for the handler rather than returning outright gives it the
+		// chance to re-raise, which is what sets the exit status. Usually the
+		// process dies inside this wait; when the signal was one the process
+		// inherited as ignored, the handler finishes instead and this returns.
+		if farewell.Said() {
+			<-stopped
+			return
+		}
+
 		// A refusal is usually terminal: retrying a bad token, an illegal name,
 		// or a --no-tls dial to a public address would just spin.
 		//

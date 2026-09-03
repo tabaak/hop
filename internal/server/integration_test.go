@@ -968,3 +968,96 @@ func TestHeldNameAnswers503WhileANameNobodyHasStays404(t *testing.T) {
 		t.Errorf("unclaimed name answered %d, want %d", code, http.StatusNotFound)
 	}
 }
+
+// The other half of the grace window: a stop that was meant frees the name at
+// once. Ctrl-C and `hop stop` both arrive as signals, and the agent says so on
+// the way out, so the very next command can have the name back.
+func TestGoodbyeReleasesTheNameImmediately(t *testing.T) {
+	h := newHarness(t, false)
+
+	// The agent that newHarness started has no Farewell, so run our own.
+	h.control.dropAll()
+	h.waitForListingWithout(t, "myapp")
+
+	farewell := &client.Farewell{}
+	cfg := h.agent
+	cfg.Farewell = farewell
+	go client.Run(cfg)
+	h.waitForTunnel(t)
+
+	farewell.Say(5 * time.Second)
+	h.waitForListingWithout(t, "myapp")
+
+	// Free for anyone, with no window to wait out: another owner takes it.
+	other := h.agent
+	other.Token = otherToken
+	other.Subdomain = "myapp"
+	other.Farewell = &client.Farewell{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Run(other)
+		done <- err
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if code := h.status(t, "myapp", "/"); code == http.StatusOK {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("another owner could not take a name that was given up: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("name never became usable by another owner after a goodbye")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	other.Farewell.Say(5 * time.Second)
+}
+
+// The goodbye must not be the only thing keeping the window honest: a session
+// that dies without one still leaves its name held. This is the same drop the
+// resilience path relies on, asserted from the other direction so a bug that
+// made every disconnect look deliberate would be caught.
+func TestADropWithoutAGoodbyeStillHolds(t *testing.T) {
+	h := newHarness(t, false)
+
+	farewell := &client.Farewell{}
+	cfg := h.agent
+	cfg.Farewell = farewell
+	h.control.dropAll()
+	h.waitForListingWithout(t, "myapp")
+	go client.Run(cfg)
+	h.waitForTunnel(t)
+
+	// Cut the transport rather than saying goodbye. The Farewell is never
+	// used, which is exactly the case being tested.
+	h.control.dropAll()
+	h.waitForListingWithout(t, "myapp")
+
+	if code := h.status(t, "myapp", "/"); code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d after an unannounced drop, want %d (held)",
+			code, http.StatusServiceUnavailable)
+	}
+	other := h.agent
+	other.Token = otherToken
+	other.Subdomain = "myapp"
+	_, err := client.Run(other)
+	var refused *client.Refusal
+	if !errors.As(err, &refused) || refused.Code != proto.CodeTaken {
+		t.Fatalf("an unannounced drop did not hold its name: err = %v", err)
+	}
+}
+
+// Saying goodbye when nothing is connected is what a Ctrl-C during a backoff
+// looks like. It must return at once rather than waiting out its bound.
+func TestFarewellWithNoSessionReturnsImmediately(t *testing.T) {
+	var f client.Farewell
+	start := time.Now()
+	f.Say(10 * time.Second)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Say with no session took %v, want immediate", elapsed)
+	}
+}

@@ -73,6 +73,21 @@ type HelloAck struct {
 	Code string `json:"code,omitempty"`
 }
 
+// Bye is the agent saying a stop was deliberate — Ctrl-C, or `hop stop` —
+// rather than a connection that failed. It travels on its own yamux stream
+// after the handshake, not as a new dial and not as a new op.
+//
+// A stream is what makes this safe to add without a version bump, and the
+// reason is worth stating: a server too old to know about it never calls
+// Accept, so the stream is discarded and the agent's name is held for the
+// usual window, which is that server's existing behaviour. A new op would be
+// far worse — anything that isn't OpList falls through to the tunnel path, so
+// an old server would read a goodbye as a request to *claim* a name.
+type Bye struct {
+	// Reason is for the log, not for logic. Empty means an ordinary stop.
+	Reason string `json:"reason,omitempty"`
+}
+
 // Listing is the server's reply to OpList.
 type Listing struct {
 	Tunnels []TunnelInfo `json:"tunnels"`

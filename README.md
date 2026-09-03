@@ -549,6 +549,10 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
   arriving meanwhile get a **503 with `Retry-After`**, not a 404 — senders read
   a 404 as *this endpoint is gone*, drop the delivery, and in some cases
   disable the endpoint. A name nobody ever claimed is still a 404.
+- **Stopping on purpose frees the name at once.** Ctrl-C and `hop stop` say so
+  before exiting, so the next command can reuse the subdomain immediately
+  instead of waiting out a window meant for a network that failed. A tunnel
+  killed outright can't say anything, and is held for the full 45 seconds.
 
 ## Not yet
 

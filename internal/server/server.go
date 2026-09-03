@@ -200,6 +200,11 @@ func (s *Server) handleAgent(conn net.Conn) {
 	log.Printf("agent %s: tunnel up for %q (%d live)", who, sub, s.reg.Count())
 
 	t.Wait()
+	// A goodbye is the difference between "this laptop is on a train" and
+	// "this developer pressed Ctrl-C". Only the first is worth holding a name
+	// for; the second wants its name back immediately, most often because it
+	// is about to be used again by the very next command.
+	hold = !t.Graceful()
 	log.Printf("agent %s: tunnel down for %q", who, sub)
 }
 

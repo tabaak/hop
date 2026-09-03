@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"hop.vokh.dev/internal/client"
 )
 
 // detachEnv marks the re-executed copy, so the child runs the tunnel instead of
@@ -119,25 +121,49 @@ func spawnDetached() {
 // colour switches itself off and nobody is watching for progress.
 func isDetachedChild() bool { return os.Getenv(detachEnv) != "" }
 
-// cleanupOnSignal removes the state record on a termination signal. Without it
-// the file would sit there until something noticed its lock was free — correct,
-// but it means `hop ps` cleans up after a process the user stopped a week ago.
+// byeWait bounds the goodbye. It is a round trip to the server on a connection
+// that is already open, so this is generous; the point of a bound at all is
+// that Ctrl-C must never appear to hang, least of all when the reason for
+// pressing it was a network that had already gone.
+const byeWait = time.Second
+
+// cleanupOnSignal ends the tunnel tidily on a termination signal: it tells the
+// server the stop was deliberate, so the name is free immediately rather than
+// held for the grace window, and it removes the state record. Without the
+// latter the file would sit there until something noticed its lock was free —
+// correct, but it means `hop ps` cleans up after a process the user stopped a
+// week ago.
 //
-// Only the signals that mean "stop" are handled, and the process still dies:
-// the handler releases the file and re-raises with the default disposition, so
-// the exit status is the one the caller expects.
-func cleanupOnSignal(sf *stateFile) {
-	if sf == nil {
-		return
-	}
+// Only the signals that mean "stop" are handled, and the process normally dies
+// where it says so below: the handler does its work and re-raises with the
+// default disposition, so the exit status is the one the caller expects.
+//
+// The returned channel closes once the handler has finished, and exists
+// because "normally" is not "always". A process started as a background job by
+// a non-interactive shell inherits SIGINT ignored; Notify overrides that so the
+// handler still runs, but Reset puts the ignore back and the re-raise does
+// nothing at all. The reconnect loop waits on this channel rather than on being
+// killed, so that case exits promptly instead of hanging on a signal that is
+// never coming.
+func cleanupOnSignal(sf *stateFile, farewell *client.Farewell) <-chan struct{} {
+	done := make(chan struct{})
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
+		defer close(done)
 		sig := <-ch
-		sf.release()
+		// Said first. Releasing the local record is instant and the goodbye is
+		// a round trip, so doing it the other way round would mean `hop stop`
+		// followed immediately by `hop http --sub <same>` could find the name
+		// still held by the agent it just stopped.
+		farewell.Say(byeWait)
+		if sf != nil {
+			sf.release()
+		}
 		signal.Reset(sig.(syscall.Signal))
 		syscall.Kill(os.Getpid(), sig.(syscall.Signal))
 	}()
+	return done
 }
 
 // tail returns the last n lines of a file, for explaining a child that died

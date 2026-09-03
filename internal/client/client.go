@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -50,6 +51,91 @@ type Config struct {
 	// reconnect — the name can change if the old one was taken while the agent
 	// was away. Called from Run's goroutine, before any request is served.
 	OnUp func(sub, url string)
+	// Farewell, if set, lets a signal handler end the tunnel deliberately. Run
+	// keeps it pointed at whichever session is live.
+	Farewell *Farewell
+}
+
+// Farewell ends a tunnel on purpose.
+//
+// A dropped connection and a deliberate stop look identical from the server's
+// side — both are a session that stopped answering — so the name is held for
+// the grace window either way unless the agent says otherwise. This is how it
+// says otherwise: one frame, on one stream, on the session that happens to be
+// live at the time.
+//
+// Nothing depends on the goodbye arriving. A lost one — SIGKILL, a panic, a
+// connection that is already half open — leaves the name to be released when
+// its window expires, which is what would have happened anyway.
+type Farewell struct {
+	mu   sync.Mutex
+	sess *yamux.Session
+	said bool
+}
+
+// Said reports whether a goodbye has been sent. The reconnect loop has to ask:
+// Say ends the session, which makes Run return exactly as a dropped connection
+// would, and a loop that could not tell them apart would dial straight back and
+// re-claim the name it had just handed over.
+func (f *Farewell) Said() bool {
+	if f == nil {
+		return false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.said
+}
+
+// hold points the farewell at the live session, or at nothing once it ends.
+func (f *Farewell) hold(sess *yamux.Session) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	f.sess = sess
+	f.mu.Unlock()
+}
+
+// Say tells the server this stop was deliberate, and waits up to wait for it
+// to let go. It returns at once when there is no session to say it on, which
+// is the case whenever the agent is between reconnects — a Ctrl-C during a
+// backoff should not pause at the prompt for something nobody is listening to.
+func (f *Farewell) Say(wait time.Duration) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	sess := f.sess
+	f.sess = nil
+	// Recorded even when there is no session to say it on: the stop was still
+	// deliberate, and an agent sitting in a backoff must not dial again.
+	f.said = true
+	f.mu.Unlock()
+	if sess == nil {
+		return
+	}
+
+	deadline := time.Now().Add(wait)
+	st, err := sess.OpenStream()
+	if err != nil {
+		sess.Close()
+		return
+	}
+	// Deadlined rather than left to the session's own write timeout, which is
+	// fifteen seconds: a goodbye that hung would delay the shutdown it exists
+	// to hurry along.
+	st.SetWriteDeadline(deadline)
+	proto.Write(st, proto.Bye{})
+	st.Close()
+
+	// The server closes the session once it has read the frame, so the close
+	// is the acknowledgement. Past the deadline, stop waiting and drop the
+	// connection: the name will expire on its own.
+	select {
+	case <-sess.CloseChan():
+	case <-time.After(time.Until(deadline)):
+		sess.Close()
+	}
 }
 
 // Request is one logged request. Status and Took are filled in when the
@@ -151,6 +237,9 @@ func Run(cfg Config) (Result, error) {
 		return res, fmt.Errorf("yamux upgrade: %w", err)
 	}
 	defer sess.Close()
+
+	cfg.Farewell.hold(sess)
+	defer cfg.Farewell.hold(nil)
 
 	fmt.Fprintf(os.Stderr, "\n  %s  →  http://%s\n\n", ack.URL, cfg.Local)
 	if cfg.OnUp != nil {

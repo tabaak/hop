@@ -52,6 +52,7 @@ On the raw TLS conn, before yamux: length-prefixed JSON.
 type Hello struct { Token, Op, Subdomain, Local, Version string }
 type HelloAck struct { URL, Subdomain string; Err, Code string }
 type Listing struct { Tunnels []TunnelInfo; Err string }
+type Bye struct { Reason string }   // on its own stream, after the handshake
 ```
 
 `Op` picks what the connection is for: `tunnel` (the default, and what an empty
@@ -263,7 +264,7 @@ every use. `$BROWSER` overrides the platform opener, `--no-open` opts out, and
 a failure to launch (headless box, bare SSH session) is silent by design — the
 URL is in the banner either way.
 
-### M6 — Resilience & self-healing 🚧 planned
+### M6 — Resilience & self-healing ✅ done
 
 A tunnel should survive a Wi-Fi switch, a closed lid, or a minute of packet
 loss without anyone typing anything. The agent already reconnects; what it
@@ -384,7 +385,7 @@ a single VPS for a few seconds of a sender's patience is a bad trade.
 Which means the arithmetic must be stated plainly: server-side detection is
 still keepalive-bound, so a 45s lease is really a **~90s worst-case name hold**.
 
-#### Clean exit: `Bye` on a yamux stream
+#### Clean exit: `Bye` on a yamux stream ✅
 
 Ctrl-C and `hop stop` must free the name now, not in 45s. The agent opens one
 stream and writes a `Bye` frame before closing the session; `handleAgent`
@@ -404,6 +405,25 @@ panic, a half-dead connection — degrades to the lease expiring normally, which
 is today's behaviour. The write gets a short deadline of its own, since a
 `Bye` blocked for the full `ConnectionWriteTimeout` would hang the shutdown it
 was added to speed up.
+
+Ordering on the server is the part that needed care: the goodbye is recorded
+*before* the session close, and that close is what wakes `Wait`. Had the agent
+closed its own session after writing, `handleAgent` would have raced the
+goroutine reading the frame and held the name of an agent that had just asked
+it not to.
+
+Two things only a real run surfaced, both now covered:
+
+- **`Say` ends the session, which makes `Run` return exactly as a drop does.**
+  The loop dialled straight back and re-claimed the name it had just handed
+  over — visible in `hopd`'s log as a `tunnel down` followed immediately by a
+  `tunnel up`. `Farewell.Said` is what the loop asks to tell the two apart.
+- **The re-raise is not guaranteed to kill.** A background job started by a
+  non-interactive shell inherits SIGINT ignored; `Notify` overrides that so the
+  handler runs, but `Reset` restores the ignore and the re-raise does nothing.
+  `cleanupOnSignal` now returns a channel that closes when the handler is done,
+  so the loop exits on that rather than on being killed. In a terminal the
+  process still dies inside the wait, with the exit status the shell expects.
 
 #### Detection and backoff
 
@@ -455,7 +475,7 @@ Backoff first ✅: a pure function, no protocol, ships alone. Then refusal codes
 and the non-terminal reclaim ✅ — before any lease code exists, since until that
 lands every other piece here converts a blip into an exit. Then the tombstone,
 the `Reserve` branch, the `hold` flag, and the revocation/random-name sweeps
-together ✅. Then 503 ✅. Then `Bye` last, as the only piece that adds a frame.
+together ✅. Then 503 ✅. Then `Bye` last ✅, as the only piece that adds a frame.
 
 Tests, all in the existing harnesses:
 

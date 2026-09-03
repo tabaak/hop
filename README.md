@@ -536,10 +536,19 @@ hop's protocol rather than HTTP and can't be proxied. See [deploy/](deploy/).
   agent could clear your screen or forge a row in your table.
 - **Detaching is Unix-only.** It needs `setsid` and `flock`; `hop http` in the
   foreground has no such requirement.
-- **Reconnects back off** from 1s to 30s. A session that survives 30s resets the
-  backoff, so an overnight tunnel doesn't crawl after one blip.
+- **Reconnects back off with full jitter** — a random wait drawn from a window
+  that doubles from 1s to 30s, rather than the window itself. Agents that lost
+  the same server lost it at the same instant, so waiting exactly 8s each just
+  reconvenes the stampede. A session that carried a request, or that stayed up
+  for 30s without one, resets the backoff — so an overnight tunnel doesn't
+  crawl after one blip.
 - **A dead local app returns a readable 502** through the tunnel rather than a
   bare connection reset.
+- **A tunnel that drops keeps its URL** for 45 seconds, so the name a webhook
+  is registered against is still yours when the agent reconnects. Requests
+  arriving meanwhile get a **503 with `Retry-After`**, not a 404 — senders read
+  a 404 as *this endpoint is gone*, drop the delivery, and in some cases
+  disable the endpoint. A name nobody ever claimed is still a 404.
 
 ## Not yet
 

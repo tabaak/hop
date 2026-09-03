@@ -3,6 +3,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -19,6 +20,24 @@ import (
 // handshakeTimeout bounds how long a freshly accepted control connection may
 // take to identify itself, so idle or hostile dials can't pile up.
 const handshakeTimeout = 10 * time.Second
+
+// graceWindow is how long a dropped tunnel's name stays with its owner.
+//
+// The number is arbitrary and worth saying so: nothing can take the name
+// during the window but the owner itself, so this is not a race to win. It
+// bounds how long a laptop that is never coming back squats a name, and it is
+// long enough to cover a Wi-Fi switch, a sleep, or a few rounds of a backoff
+// that starts at under a second.
+//
+// Note it stacks with detection: the server only starts the window once yamux
+// notices the session is gone, so the worst case from the drop itself is this
+// plus a keepalive interval.
+const graceWindow = 45 * time.Second
+
+// retryAfter is the Retry-After sent with a held name's 503, in seconds. Short
+// enough that a sender pacing itself by the header comes back inside the
+// window rather than after it.
+const retryAfter = "5"
 
 type Config struct {
 	// Domain is the zone tunnels live under, e.g. "hop.vokh.dev".
@@ -58,6 +77,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	t, ok := s.reg.Lookup(sub)
 	if !ok {
+		// A name whose agent dropped is held for a moment, and answering "not
+		// found" for it would be a lie with consequences: a webhook sender
+		// reads 404 as *this endpoint is gone*, stops trying, and in some
+		// cases disables the endpoint outright. 503 is what every other
+		// transient outage says, and the senders that retry at all retry on
+		// it.
+		//
+		// Retry-After is sent because it is the honest header for this, not
+		// because much will read it — Stripe, GitHub and Slack all pace their
+		// own retries and ignore it.
+		if left, held := s.reg.Leased(sub); held {
+			w.Header().Set("Retry-After", retryAfter)
+			s.writeStatus(w, http.StatusServiceUnavailable, fmt.Sprintf(
+				"%q lost its agent and is reconnecting. The name is held for another %s.",
+				sub, left.Round(time.Second)))
+			return
+		}
 		s.writeStatus(w, http.StatusNotFound,
 			fmt.Sprintf("No agent is serving %q right now.", sub))
 		return
@@ -127,8 +163,21 @@ func (s *Server) handleAgent(conn net.Conn) {
 	// the whole reason tokens are issued per device.
 	who := fmt.Sprintf("%s (%s)", remote, c.label)
 
-	// From here the claim is ours; every exit path must release it.
-	defer s.reg.Release(sub, gen)
+	// From here the claim is ours; every exit path must dispose of it.
+	//
+	// A session that never bound is released outright: nothing was ever
+	// reachable under that name, and holding it would let an agent crash-
+	// looping through the handshake lock itself out of its own namespace, one
+	// fresh grace window per attempt. Only a tunnel that actually served leaves
+	// a lease behind.
+	hold := false
+	defer func() {
+		if hold && s.reg.Lease(sub, gen, graceWindow) {
+			log.Printf("agent %s: holding %q for %s", who, sub, graceWindow)
+			return
+		}
+		s.reg.Release(sub, gen)
+	}()
 
 	if c.evicted != nil {
 		log.Printf("agent %s: taking over %q from a previous session", who, sub)
@@ -147,6 +196,7 @@ func (s *Server) handleAgent(conn net.Conn) {
 
 	t := NewTunnel(sub, c.local, sess, s.cfg.PublicScheme)
 	s.reg.Bind(sub, gen, t)
+	hold = true
 	log.Printf("agent %s: tunnel up for %q (%d live)", who, sub, s.reg.Count())
 
 	t.Wait()
@@ -180,7 +230,7 @@ func (s *Server) hello(conn net.Conn) (h proto.Hello, label string, ok bool) {
 		log.Printf("agent %s: rejected token", conn.RemoteAddr())
 		// A HelloAck, whatever the op. Its Err field is the one thing both
 		// reply types share a name for, so a refused list still decodes.
-		proto.Write(conn, proto.HelloAck{Err: "invalid token"})
+		proto.Write(conn, proto.HelloAck{Err: "invalid token", Code: proto.CodeBadToken})
 		return h, "", false
 	}
 	return h, label, true
@@ -221,7 +271,7 @@ func (s *Server) claim(conn net.Conn, h proto.Hello, label string) (c claim, ok 
 	// separately.
 	sub, gen, evicted, err := s.reg.Reserve(h.Subdomain, label)
 	if err != nil {
-		proto.Write(conn, proto.HelloAck{Err: err.Error()})
+		proto.Write(conn, proto.HelloAck{Err: err.Error(), Code: refusalCode(err)})
 		return claim{}, false
 	}
 
@@ -237,6 +287,21 @@ func (s *Server) claim(conn net.Conn, h proto.Hello, label string) (c claim, ok 
 		return claim{}, false
 	}
 	return claim{sub: sub, label: label, local: proto.CleanLocal(h.Local), gen: gen, evicted: evicted}, true
+}
+
+// refusalCode classifies a Reserve failure for the agent. An error with no
+// code is one the agent should not retry, which is the right default: the
+// exhausted-namespace case is the only unclassified one, and a server with no
+// free names left is not a situation another dial in a second improves.
+func refusalCode(err error) string {
+	switch {
+	case errors.Is(err, ErrTaken):
+		return proto.CodeTaken
+	case errors.Is(err, ErrBadName):
+		return proto.CodeBadName
+	default:
+		return ""
+	}
 }
 
 func (s *Server) urlFor(sub string) string {

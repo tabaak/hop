@@ -177,23 +177,29 @@ func runHTTP(args []string) {
 	// Reconnect with backoff, because a laptop lid closing shouldn't end the
 	// session. A refusal is terminal: retrying a bad token or a name someone
 	// else holds would just spin.
-	const (
-		minBackoff = time.Second
-		maxBackoff = 30 * time.Second
-		// A session that lasted this long counts as healthy, so the next drop
-		// starts backing off from scratch rather than from 30s.
-		healthy = 30 * time.Second
-	)
-	backoff := minBackoff
+	//
+	// See healthySession for when a drop resets the backoff.
+	attempt := 0
 	for {
 		start := time.Now()
-		assigned, err := client.Run(cfg)
+		res, err := client.Run(cfg)
 
 		// Ask for the same name next time so the URL survives the reconnect.
-		if assigned != "" {
-			cfg.Subdomain = assigned
+		if res.Subdomain != "" {
+			cfg.Subdomain = res.Subdomain
 		}
-		if errors.Is(err, client.ErrRefused) {
+		// A refusal is usually terminal: retrying a bad token, an illegal name,
+		// or a --no-tls dial to a public address would just spin.
+		//
+		// The exception is a name taken out from under a tunnel that had
+		// already come up. The holder is then almost always this agent's own
+		// previous session — or, once the server holds grace leases, the lease
+		// that session left behind — and it lets go without being asked. Only
+		// a Refusal carries a code; the private-peer check wraps ErrRefused
+		// without one, and stays terminal.
+		var refused *client.Refusal
+		reclaimable := errors.As(err, &refused) && refused.Retryable() && everUp
+		if errors.Is(err, client.ErrRefused) && !reclaimable {
 			fmt.Fprintf(os.Stderr, "hop: tunnel %v\n", err)
 			// os.Exit runs no deferred calls, so the record is dropped by hand.
 			// The lock would mark it dead anyway; this just keeps the directory
@@ -215,14 +221,15 @@ func runHTTP(args []string) {
 			}
 			os.Exit(1)
 		}
-		if time.Since(start) > healthy {
-			backoff = minBackoff
+		if healthySession(res.Served, time.Since(start)) {
+			attempt = 0
 		}
 
-		fmt.Fprintf(os.Stderr, "hop: %v — reconnecting in %s\n", err, backoff.Round(time.Second))
-		time.Sleep(backoff)
-		if backoff *= 2; backoff > maxBackoff {
-			backoff = maxBackoff
+		wait := nextBackoff(attempt)
+		fmt.Fprintf(os.Stderr, "hop: %v — reconnecting in %s\n", err, wait.Round(100*time.Millisecond))
+		time.Sleep(wait)
+		if attempt < maxAttempt {
+			attempt++
 		}
 	}
 }

@@ -50,13 +50,19 @@ On the raw TLS conn, before yamux: length-prefixed JSON.
 
 ```go
 type Hello struct { Token, Op, Subdomain, Local, Version string }
-type HelloAck struct { URL, Subdomain string; Err string }
+type HelloAck struct { URL, Subdomain string; Err, Code string }
 type Listing struct { Tunnels []TunnelInfo; Err string }
 ```
 
 `Op` picks what the connection is for: `tunnel` (the default, and what an empty
 value means) or `list`, which answers `hop ps` and hangs up without upgrading to
 yamux or claiming a name.
+
+`Code` classifies a refusal — `taken`, `bad-name`, `bad-token` — because the
+agent's reaction differs: a name someone else holds is worth waiting out, a bad
+token is worth exiting over. An empty code means "assume nothing will change",
+which is what a server too old to send one produces and how every refusal was
+treated before the field existed.
 
 Then both sides upgrade to yamux. Note the roles are inverted vs. the TCP
 direction: the agent dials, but the **server** opens streams, so `hopd` runs
@@ -256,6 +262,229 @@ and making you copy the URL out of its own banner was one step of ceremony for
 every use. `$BROWSER` overrides the platform opener, `--no-open` opts out, and
 a failure to launch (headless box, bare SSH session) is silent by design — the
 URL is in the banner either way.
+
+### M6 — Resilience & self-healing 🚧 planned
+
+A tunnel should survive a Wi-Fi switch, a closed lid, or a minute of packet
+loss without anyone typing anything. The agent already reconnects; what it
+doesn't do is keep its name, and a URL that changes under you is worse than a
+tunnel that dropped — the drop you notice, the rename silently invalidates the
+endpoint you gave Stripe an hour ago.
+
+**The invariant**, stated so the scope stops sliding: *for a given owner label,
+the mapping `subdomain → that owner` survives any transient loss of the
+transport, and a request arriving in the gap is told to come back rather than
+told the endpoint is gone.* Everything below is the least mechanism that holds
+it. Anything that doesn't serve it is in "not in scope" at the bottom.
+
+#### The lease is a tombstone, not a subsystem
+
+`Reserve` already does the interesting half: a same-owner reclaim of a live
+name evicts the predecessor and hands the name over. That *is* the reconnect
+path. The only thing that breaks it is `defer s.reg.Release(sub, gen)` in
+`handleAgent`, which deletes the claim the moment yamux notices the session is
+gone.
+
+So M6's registry change is not a lease manager. On an **unexpected** exit the
+entry stays: `tunnel` goes nil, `expires` is stamped, `owner` is untouched.
+`Lookup` keeps treating it as absent — nothing may be routed to a name with no
+session behind it — and the claim frees itself when the window passes.
+
+Expiry is a `time.AfterFunc` calling `Release(sub, gen)`, not a reaper
+goroutine. The generation guard that already protects against a slow-exiting
+predecessor protects against a stale timer for free: a successor that reclaimed
+the name holds a newer `gen`, so the old timer's `Release` no-ops. A reaper
+scanning the map would be the third party that makes `gen` insufficient.
+
+`Reserve` grows a three-way branch where it currently has one:
+
+- unbound and **never leased** — a claim still mid-handshake — stays `ErrTaken`,
+  even for the same owner. Two of your own agents must not be able to steal
+  each other's half-built claims.
+- **leased, unexpired, same owner** — reclaim: new generation, same name,
+  nothing to evict.
+- **leased and expired** — the name is free, for anyone.
+
+**Grace window: 45s.** The number is arbitrary and worth saying so. Nothing
+takes the name from you but you; the window exists only to bound how long a
+dead laptop can squat a name, not to win a race.
+
+#### Three latent bugs this trips, all of which must land first
+
+1. **A naive lease bricks the agent.** `Reserve` returns `ErrTaken` for an
+   unbound entry, `client.Run` wrapped any `ack.Err` as `ErrRefused`, and
+   `runHTTP` treated `ErrRefused` as fatal. Ship the lease on top of that and
+   the first Wi-Fi switch is: hold the name → agent reconnects → refused by its
+   own lease → `os.Exit(1)`. A feature whose entire effect is converting a
+   survivable blip into a hard exit.
+
+   **The agent half of this is done**, ahead of any lease code, since it is the
+   half that has to exist first. Refusals now carry a `Code`, and a refusal is
+   still terminal *unless* it is a taken name met by an agent that had already
+   been up — that agent is reclaiming a name whose holder is almost certainly
+   its own predecessor. The private-peer check in `peer.go` wraps `ErrRefused`
+   without a code and stays terminal, which is why the test is `errors.Is` for
+   the refusal and `errors.As` for the retry, rather than one or the other.
+   The `Reserve` half lands with the tombstone below: until an entry can be
+   leased there is no new state for it to branch on.
+2. **Lease only what actually bound.** The old `defer` fired on every exit
+   path, including a refused claim and a failed yamux upgrade. A `hold` flag
+   set only after `Bind` keeps those instant.
+
+   The scenario this was justified with — a crash-looping agent locking itself
+   out, one fresh window per attempt — turns out not to exist, and the reason
+   is worth recording: a hold never blocks *its own owner*, so an agent that
+   dies and comes straight back reclaims its name every time. What the flag
+   actually buys is that a claim which was refused, or which never became
+   reachable, doesn't take a name out of circulation for everyone else. Note
+   also that `yamux.Client` does not fail on an already-dead connection, so the
+   unbound-exit path is nearly unreachable in practice; the flag is about the
+   guarantee, not about a case seen in the wild.
+3. **Revocation stops reaching leased names.** `CloseRevoked`, `Snapshot` and
+   `Count` all iterated `e.tunnel != nil`, so a tombstone was invisible to all
+   three: deleting a leaked token would leave that label's subdomains held
+   anyway. `CloseRevoked` now sweeps held names too — and takes the write lock
+   to **delete before closing** rather than after. That order is the fix, not a
+   tidiness: closing a tunnel wakes the goroutine serving it, whose last act is
+   to lease the name, which would hand a revoked credential its subdomain back
+   for another 45s. `Lease` is generation-guarded against an entry that is
+   gone, so removing the claim first is what makes revocation stick.
+
+   Same class of bug: `Reserve`'s random-name loop tested `_, exists :=
+   r.entries[c]`, so expired tombstones would have permanently shrunk the
+   namespace. Both that loop and the claim path now treat an expired entry as
+   absent, whichever way the timer happens to have gone — so no answer depends
+   on timer latency.
+
+   `Snapshot` and `Count` still skip held names, deliberately: `hop ps` lists
+   what is serving, and a name with nothing behind it is not.
+
+#### Ingress during the gap: 503, not 404 ✅
+
+A 404 tells a webhook sender the endpoint is gone, which is the outcome the
+milestone exists to prevent. When `Lookup` misses but the name is leased, hopd
+answers **503 with `Retry-After: 5`** and a body naming hop and the subdomain,
+so it reads as a tunnel being down rather than a URL being wrong.
+
+Worth being honest about what that buys: `Retry-After` is widely ignored, and
+senders differ — some retry on any non-2xx, so the status barely matters to
+them; GitHub's repository webhooks don't redeliver automatically at all, so
+that delivery is lost either way. 503 is still right, because repeated 404s are
+what get an endpoint auto-disabled, and because it is the truthful answer.
+
+**Requests are not parked.** Holding client sockets waiting for an agent to
+come back sounds like it saves the delivery, and doesn't: parking only engages
+once `Lookup` misses, but the server doesn't know the session is dead for ~45s.
+For that whole window `Lookup` returns a live `*Tunnel`, ingress opens a stream
+on a corpse, and the request hangs into `ConnectionWriteTimeout` and 502s — the
+park never runs. Fixing that means faster detection, and then the ceiling is
+the sender's own ~10s timeout, not our grace window. Unbounded held sockets on
+a single VPS for a few seconds of a sender's patience is a bad trade.
+
+Which means the arithmetic must be stated plainly: server-side detection is
+still keepalive-bound, so a 45s lease is really a **~90s worst-case name hold**.
+
+#### Clean exit: `Bye` on a yamux stream
+
+Ctrl-C and `hop stop` must free the name now, not in 45s. The agent opens one
+stream and writes a `Bye` frame before closing the session; `handleAgent`
+releases instead of leasing when it saw one.
+
+It goes **on a stream, not on a new dial**, for a specific reason. Unknown ops
+are not ignored — `handleAgent` branches on `OpList` and everything else falls
+through to the tunnel path, so an `Op:"release"` dial against an older hopd
+would be read as a tunnel request: it would *reserve* the name and ack it. That
+is exactly the hazard `Listing.URL` exists to warn about. A stream is safe for
+the mirror-image reason: the server never calls `sess.Accept()` today, so an
+old server discards the Bye silently and an old agent simply never sends one.
+No `Version` bump, no skew to design around.
+
+**Correctness never depends on the goodbye arriving.** A lost Bye — SIGKILL, a
+panic, a half-dead connection — degrades to the lease expiring normally, which
+is today's behaviour. The write gets a short deadline of its own, since a
+`Bye` blocked for the full `ConnectionWriteTimeout` would hang the shutdown it
+was added to speed up.
+
+#### Detection and backoff
+
+Keepalive **stays at 30s**. Shortening it makes every phone and every metered
+connection pay for the lid-close case, and the server holds the lease either
+way, so faster detection buys only a shorter 503 window.
+
+Backoff becomes full jitter: `sleep = rand(0, min(30s, 1s << attempt))`, pulled
+out into a pure function so it can be tested without waiting. The attempt
+counter is capped, and not for tidiness: `1s << 34` overflows to a negative
+duration and `rand.Int63n` panics on it, which an agent left running through a
+long outage would reach.
+
+The reset rule is `served || elapsed > 30s`, and it needs both halves. Elapsed
+time alone believes a server that accepts connections and then ignores them.
+Traffic alone punishes an idle webhook endpoint that sat there correctly for
+six hours without being called — which is the ordinary state of the thing this
+tool exists to serve, so "reset only on work done" would have been a
+regression. Elapsed time is monotonic, and darwin's monotonic clock doesn't
+advance across sleep: a session that spanned a closed lid is judged on the part
+of it that was awake, which is the only part that says anything about health.
+
+The agent never gives up on a tunnel that was once up. A bad token still exits.
+
+If a wall-clock-jump detector for sleep/wake lands later, note that the obvious
+version doesn't work: `time.Since` won't see the jump. It needs
+`time.Now().Round(0)` to strip the monotonic reading and compare the wall delta
+against the monotonic one.
+
+#### What it looks like
+
+The drop is narrated, because ~30s of silence after an error is
+indistinguishable from a crash: what dropped, that the URL is held and for how
+long, and when the next attempt is. On recovery, how long it was down.
+
+The one thing that must be loud is a **changed name**. `OnUp` currently
+rewrites the state file with a new subdomain and prints nothing, which is the
+single most expensive surprise this tool can produce — it silently invalidates
+whatever the old URL was registered with. If the name changed, say so where it
+can't be missed.
+
+`hopd` logs the lease and its expiry, the reclaim, and the release, so a name
+that is held has a reason on the server. A refusal for a name held by someone
+else can say so, and for how long.
+
+#### Order of work
+
+Backoff first ✅: a pure function, no protocol, ships alone. Then refusal codes
+and the non-terminal reclaim ✅ — before any lease code exists, since until that
+lands every other piece here converts a blip into an exit. Then the tombstone,
+the `Reserve` branch, the `hold` flag, and the revocation/random-name sweeps
+together ✅. Then 503 ✅. Then `Bye` last, as the only piece that adds a frame.
+
+Tests, all in the existing harnesses:
+
+- `nextBackoff` — bounds over a thousand draws, cap holds, no panic at a large
+  attempt count, and the reset rule.
+- `registry_test.go`, beside `TestReserveEvictsOwnSessionOnReconnect`: reclaim
+  of one's own lease; another owner refused while it holds; expiry frees the
+  name; `Lookup` treats a lease as absent; a stale timer cannot drop a
+  successor; a mid-handshake claim still refuses its own owner; revocation
+  clears leases; the random-name loop skips expired ones.
+- `integration_test.go`, beside `TestUnknownSubdomainIs404`: a leased name
+  answers 503; a hard-closed connection reconnects onto the same subdomain;
+  `Bye` frees the name immediately. The harness needs one hook — a handle on
+  the agent's `net.Conn` — so a test can kill the transport the way a network
+  does, rather than closing the session politely.
+
+#### Not in scope
+
+Parking requests, per-lease resume secrets (the label already gates eviction of
+*live* tunnels, so a nonce guarding dead ones defends nothing), device handoff,
+persisting leases across a `hopd` restart, reserved/durable names, OS
+network-change notifications, a shorter keepalive, a persistent status line, and
+a state column in `hop ps`. Each is a reasonable feature; none of them is this
+invariant.
+
+One thing genuinely missing and worth a follow-up: two devices sharing a label
+can now evict each other indefinitely, each reconnecting and re-evicting, which
+is a permanently flapping URL. The fix is an instance id and refusing the loser
+outright rather than letting it spin.
 
 ## Decisions
 

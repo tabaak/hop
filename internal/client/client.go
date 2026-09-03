@@ -84,33 +84,71 @@ type Capture interface {
 	Close()
 }
 
-// ErrRefused means the server rejected the request for a reason that won't
-// change by retrying (bad token, taken name). Worded without a noun because
-// both a tunnel and a listing can be refused; each caller supplies its own.
+// ErrRefused means the server rejected the request. Worded without a noun
+// because both a tunnel and a listing can be refused; each caller supplies its
+// own.
 var ErrRefused = errors.New("refused")
 
-// Run connects once and serves until the tunnel drops. It returns the
-// subdomain the server assigned, so a reconnect can ask for the same one and
-// the printed URL stays valid across a network blip.
-func Run(cfg Config) (assigned string, err error) {
+// Refusal is a refused tunnel, with the reason the server gave. It matches
+// errors.Is(err, ErrRefused) like every other refusal, so callers that only
+// care that they were turned away are unaffected; callers deciding whether to
+// try again use Retryable.
+type Refusal struct {
+	// Code is one of the proto.Code* constants, or empty from a server too old
+	// to send one.
+	Code string
+	// Reason is the server's sentence, meant for a human.
+	Reason string
+}
+
+func (r *Refusal) Error() string { return "refused: " + r.Reason }
+
+// Is makes errors.Is(err, ErrRefused) true for a Refusal.
+func (r *Refusal) Is(target error) bool { return target == ErrRefused }
+
+// Retryable reports whether waiting could change the answer.
+//
+// Only a taken name qualifies. An agent that has been up and is reclaiming its
+// own name is very likely racing its own previous session — or, once the
+// server holds grace leases, the lease that session left behind — and the
+// holder lets go on its own. A bad token or an illegal name is a fact about
+// the request, and the second attempt meets the same fact.
+func (r *Refusal) Retryable() bool { return r.Code == proto.CodeTaken }
+
+// Result is what one session did, which is what the caller needs to decide how
+// to reconnect.
+type Result struct {
+	// Subdomain is the name the server assigned, so a reconnect can ask for the
+	// same one and the printed URL stays valid across a network blip.
+	Subdomain string
+	// Served is true once a request has come down the tunnel. It says the
+	// session did real work, which elapsed time does not: a server that accepts
+	// connections and then sits on them looks long-lived and is not healthy.
+	Served bool
+}
+
+// Run connects once and serves until the tunnel drops.
+func Run(cfg Config) (Result, error) {
+	var res Result
+
 	conn, err := dial(cfg)
 	if err != nil {
-		return "", fmt.Errorf("dial %s: %w", cfg.Server, err)
+		return res, fmt.Errorf("dial %s: %w", cfg.Server, err)
 	}
 
 	ack, err := handshake(conn, cfg)
 	if err != nil {
 		conn.Close()
-		return "", err
+		return res, err
 	}
-	assigned = ack.Subdomain
+	res.Subdomain = ack.Subdomain
 
 	// The agent takes the yamux server role: the hop server is the side that
 	// opens a stream per inbound request.
 	sess, err := yamux.Server(conn, tunnel.Config())
 	if err != nil {
 		conn.Close()
-		return assigned, fmt.Errorf("yamux upgrade: %w", err)
+		return res, fmt.Errorf("yamux upgrade: %w", err)
 	}
 	defer sess.Close()
 
@@ -122,8 +160,9 @@ func Run(cfg Config) (assigned string, err error) {
 	for {
 		stream, err := sess.Accept()
 		if err != nil {
-			return assigned, fmt.Errorf("tunnel closed: %w", err)
+			return res, fmt.Errorf("tunnel closed: %w", err)
 		}
+		res.Served = true
 		go forward(stream, cfg)
 	}
 }
@@ -186,7 +225,7 @@ func handshake(conn net.Conn, cfg Config) (proto.HelloAck, error) {
 		return ack, fmt.Errorf("read ack: %w", err)
 	}
 	if ack.Err != "" {
-		return ack, fmt.Errorf("%w: %s", ErrRefused, ack.Err)
+		return ack, &Refusal{Code: ack.Code, Reason: ack.Err}
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		return ack, err

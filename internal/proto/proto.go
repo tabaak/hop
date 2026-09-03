@@ -44,12 +44,33 @@ type Hello struct {
 	Version string `json:"version"`
 }
 
+// Why a tunnel was refused, in a form the agent can branch on. Err carries the
+// sentence for a human; Code says whether waiting could change the answer.
+//
+// Only CodeTaken is worth retrying, and only by an agent reclaiming a name it
+// was already using: the holder is most likely its own previous session, or
+// the grace lease left behind by one. Everything else is a fact about the
+// request that a second attempt would meet again.
+const (
+	// CodeTaken — the subdomain belongs to someone else right now.
+	CodeTaken = "taken"
+	// CodeBadName — the subdomain isn't a legal DNS label.
+	CodeBadName = "bad-name"
+	// CodeBadToken — the token isn't one this server accepts.
+	CodeBadToken = "bad-token"
+)
+
 // HelloAck is the server's reply to OpTunnel. Err is set iff the tunnel was
 // refused.
 type HelloAck struct {
 	URL       string `json:"url,omitempty"`
 	Subdomain string `json:"subdomain,omitempty"`
 	Err       string `json:"err,omitempty"`
+	// Code is one of the Code* constants, or empty from a server too old to
+	// send one. Empty means "assume nothing will change", which is how every
+	// refusal was treated before this field existed — so an old server costs
+	// an agent its reconnect, never a wrong decision.
+	Code string `json:"code,omitempty"`
 }
 
 // Listing is the server's reply to OpList.

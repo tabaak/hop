@@ -26,7 +26,10 @@ var reserved = map[string]bool{
 
 var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 
-// entry is one claimed name. tunnel is nil between Reserve and Bind.
+// entry is one claimed name. tunnel is nil in two quite different situations,
+// and telling them apart is most of what the grace window is: between Reserve
+// and Bind the claim is still being built, and after an unexpected drop it is
+// a tombstone holding the name for its owner to come back to.
 type entry struct {
 	tunnel *Tunnel
 	// owner is the token's label, not the token itself. Holding the secret in
@@ -39,7 +42,24 @@ type entry struct {
 	// that never binds has no uptime to report, and a reconnect that takes the
 	// name over starts its own clock.
 	since time.Time
+	// expires is set only on a tombstone: the moment the held name goes back
+	// to the pool. Zero on a bound tunnel and on a claim still mid-handshake.
+	expires time.Time
 }
+
+// leased reports whether e is a tombstone — a claim whose session went away
+// without saying goodbye, holding its name for the owner to reclaim.
+//
+// The zero expires is what separates it from a claim between Reserve and Bind.
+// That distinction matters: a half-built claim must refuse even its own owner,
+// or two of this operator's agents starting at once can steal each other's
+// names mid-handshake.
+func (e *entry) leased() bool { return e.tunnel == nil && !e.expires.IsZero() }
+
+// expired reports whether e is a tombstone whose window has passed. Such an
+// entry is treated as absent by everything that asks, whether or not the timer
+// that deletes it has fired yet — so the answer never depends on timer latency.
+func (e *entry) expired(now time.Time) bool { return e.leased() && now.After(e.expires) }
 
 // Registry maps a subdomain to its live tunnel.
 //
@@ -74,10 +94,16 @@ func (r *Registry) Reserve(want, owner string) (sub string, gen uint64, evicted 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	now := time.Now()
+
 	if want == "" {
 		for i := 0; i < 100; i++ {
 			c := randomName()
-			if _, exists := r.entries[c]; !exists {
+			// An expired tombstone is free even though its entry is still in
+			// the map: the timer that removes it has no bearing on whether the
+			// name is available, and a pool that shrank every time a tunnel
+			// dropped would run dry on a long-lived server.
+			if e, exists := r.entries[c]; !exists || e.expired(now) {
 				want = c
 				break
 			}
@@ -92,11 +118,26 @@ func (r *Registry) Reserve(want, owner string) (sub string, gen uint64, evicted 
 		if reserved[want] {
 			return "", 0, nil, ErrTaken
 		}
-		if e, exists := r.entries[want]; exists {
-			if e.tunnel == nil || e.owner != owner {
+		if e, exists := r.entries[want]; exists && !e.expired(now) {
+			switch {
+			case e.owner != owner:
+				// Someone else's, live or held. The lease is what makes a
+				// dropped tunnel's name un-stealable for the window, which is
+				// the point of the whole exercise.
+				return "", 0, nil, ErrTaken
+			case e.tunnel != nil:
+				// Our own live session. The server hasn't reaped it yet, so
+				// hand the name over and let the caller close it.
+				evicted = e.tunnel
+			case e.leased():
+				// Our own tombstone: the reconnect this window exists for.
+				// Nothing to evict — the session it belonged to is gone.
+			default:
+				// Our own claim, still between Reserve and Bind. Refused even
+				// though the owner matches: two agents of ours racing must not
+				// be able to take each other's half-built claims.
 				return "", 0, nil, ErrTaken
 			}
-			evicted = e.tunnel
 		}
 	}
 
@@ -125,6 +166,51 @@ func (r *Registry) Release(sub string, gen uint64) {
 	}
 }
 
+// Lease turns a bound claim into a tombstone: the tunnel is dropped but the
+// name stays with its owner until d has passed. It reports whether it acted,
+// which is false for a claim some successor has already taken over.
+//
+// This is what a dropped tunnel leaves behind, so the URL a webhook was
+// registered against still belongs to the same agent when it reconnects a few
+// seconds later.
+//
+// Expiry is a timer rather than a swept queue. The generation guard that
+// already protects Release from a slow-exiting predecessor protects it from a
+// stale timer for free: a successor that reclaimed the name holds a newer
+// generation, so the old timer finds a mismatch and does nothing. A goroutine
+// scanning the map would be a third party that guard doesn't cover.
+func (r *Registry) Lease(sub string, gen uint64, d time.Duration) bool {
+	r.mu.Lock()
+	e, ok := r.entries[sub]
+	if !ok || e.gen != gen {
+		r.mu.Unlock()
+		return false
+	}
+	e.tunnel = nil
+	e.expires = time.Now().Add(d)
+	r.mu.Unlock()
+
+	time.AfterFunc(d, func() { r.Release(sub, gen) })
+	return true
+}
+
+// Leased reports whether sub is held for an owner who isn't currently
+// connected, and how long is left. Requests for such a name are answered
+// differently from requests for a name nobody has: it is coming back.
+func (r *Registry) Leased(sub string) (time.Duration, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.entries[sub]
+	if !ok || !e.leased() {
+		return 0, false
+	}
+	left := time.Until(e.expires)
+	if left <= 0 {
+		return 0, false
+	}
+	return left, true
+}
+
 // Lookup returns the live tunnel for sub, if one is serving.
 func (r *Registry) Lookup(sub string) (*Tunnel, bool) {
 	r.mu.RLock()
@@ -148,22 +234,33 @@ func (r *Registry) Lookup(sub string) (*Tunnel, bool) {
 // Rotation is deliberately not affected: a new secret under the same label is
 // the same owner, so that tunnel stays up.
 func (r *Registry) CloseRevoked(keep map[string]bool) []string {
-	r.mu.RLock()
+	r.mu.Lock()
 	var (
 		doomed []*Tunnel
 		names  []string
 	)
 	for sub, e := range r.entries {
-		if e.tunnel != nil && !keep[e.owner] {
+		if keep[e.owner] {
+			continue
+		}
+		if e.tunnel != nil {
 			doomed = append(doomed, e.tunnel)
 			names = append(names, sub)
 		}
+		// Deleted here, before the close below rather than after it. Closing a
+		// tunnel wakes the goroutine serving it, and that goroutine's last act
+		// is to lease the name for the grace window — which would hand a
+		// revoked credential its subdomain back for another 45s. Lease is
+		// generation-guarded against an entry that is gone, so removing the
+		// claim first is what makes the revocation stick. A held name goes the
+		// same way: there is no session to close, and nothing to wait for.
+		delete(r.entries, sub)
 	}
-	r.mu.RUnlock()
+	r.mu.Unlock()
 
 	// Closed outside the lock. Each close wakes the goroutine serving that
-	// tunnel, which takes the write lock to release its claim on the way out —
-	// holding the read lock here would deadlock against it.
+	// tunnel, which takes the write lock on its way out — holding the lock
+	// here would deadlock against it.
 	for _, t := range doomed {
 		t.Close()
 	}

@@ -22,11 +22,17 @@ import (
 
 	"hop.vokh.dev/internal/client"
 	"hop.vokh.dev/internal/inspect"
+	"hop.vokh.dev/internal/proto"
 	"hop.vokh.dev/internal/server"
 	"hop.vokh.dev/internal/tokens"
 )
 
 const testToken = "test-token"
+
+// otherToken belongs to a second label, so it is a different owner: it cannot
+// take over a name the first one holds, which is what makes a refusal a
+// refusal rather than a takeover.
+const otherToken = "other-token"
 
 // TestTunnelEndToEnd_Plaintext is the M1 development path: no TLS anywhere.
 func TestTunnelEndToEnd_Plaintext(t *testing.T) {
@@ -310,6 +316,43 @@ type harness struct {
 	// agent is the config the connected agent used, so a test can dial the
 	// control port a second time with the same credentials.
 	agent client.Config
+	// control is the raw listener under any TLS, so a test can cut the
+	// transport the way a network does.
+	control *dropListener
+}
+
+// dropListener hands out the connections it accepted so a test can kill them.
+//
+// Closing the yamux session instead would be the tidy way to end a tunnel, and
+// the wrong thing to test: a session that shuts down cleanly is the case the
+// grace window is not for. Closing the TCP connection underneath it is what a
+// vanished network looks like from the server's side.
+type dropListener struct {
+	net.Listener
+	mu    sync.Mutex
+	conns []net.Conn
+}
+
+func (l *dropListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	l.conns = append(l.conns, c)
+	l.mu.Unlock()
+	return c, nil
+}
+
+// dropAll cuts every control connection accepted so far.
+func (l *dropListener) dropAll() {
+	l.mu.Lock()
+	conns := l.conns
+	l.conns = nil
+	l.mu.Unlock()
+	for _, c := range conns {
+		c.Close()
+	}
 }
 
 // harnessOpts covers the agent-side knobs the tests vary.
@@ -386,14 +429,21 @@ func newHarnessOpts(t *testing.T, opts harnessOpts) *harness {
 	srv := server.New(server.Config{
 		Domain:       "localhost",
 		PublicScheme: opts.scheme,
-		Tokens:       tokens.New(map[string]string{tokens.Hash(testToken): "test-agent"}),
+		Tokens: tokens.New(map[string]string{
+			tokens.Hash(testToken):  "test-agent",
+			tokens.Hash(otherToken): "other-agent",
+		}),
 	})
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { rawLn.Close() })
+	// Wrapped under any TLS, so dropAll cuts the TCP connection rather than
+	// closing a TLS session politely.
+	control := &dropListener{Listener: rawLn}
+	var ln net.Listener = control
 
 	local := strings.TrimPrefix(app.URL, "http://")
 	cfg := client.Config{
@@ -429,7 +479,7 @@ func newHarnessOpts(t *testing.T, opts harnessOpts) *harness {
 
 	ingress := httptest.NewServer(srv)
 	t.Cleanup(ingress.Close)
-	h := &harness{ingress: ingress, local: local, agent: cfg}
+	h := &harness{ingress: ingress, local: local, agent: cfg, control: control}
 
 	h.waitForTunnel(t)
 	return h
@@ -453,6 +503,23 @@ func (h *harness) waitForTunnel(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("tunnel did not come up within 10s")
+}
+
+// status returns just the ingress status code for a name, for the cases where
+// the body is beside the point.
+func (h *harness) status(t *testing.T, sub, path string) int {
+	t.Helper()
+	req, err := http.NewRequest("GET", h.ingress.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = sub + ".localhost"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request through ingress: %v", err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
 }
 
 func (h *harness) get(t *testing.T, sub, path string) string {
@@ -680,4 +747,224 @@ func headerOf(headers []inspect.Header, name string) string {
 		}
 	}
 	return ""
+}
+
+// A refusal has to say why, because the agent's reaction differs: a bad token
+// is worth exiting over, a taken name is worth waiting out. Before the code
+// existed both arrived as the same opaque sentence and the agent exited on
+// either — which, once the server started holding a name after a drop, would
+// have turned every reconnect into a hard exit.
+func TestRefusalCodesDistinguishTokenFromName(t *testing.T) {
+	h := newHarness(t, false)
+	h.waitForTunnel(t)
+
+	t.Run("bad token", func(t *testing.T) {
+		cfg := h.agent
+		cfg.Token = "not-the-token"
+		cfg.Subdomain = "whatever"
+		_, err := client.Run(cfg)
+
+		var refused *client.Refusal
+		if !errors.As(err, &refused) {
+			t.Fatalf("err = %v (%T), want a *client.Refusal", err, err)
+		}
+		if refused.Code != proto.CodeBadToken {
+			t.Errorf("code = %q, want %q", refused.Code, proto.CodeBadToken)
+		}
+		if refused.Retryable() {
+			t.Error("a bad token is retryable, want terminal")
+		}
+		if !errors.Is(err, client.ErrRefused) {
+			t.Error("a Refusal no longer matches ErrRefused, which other callers test for")
+		}
+	})
+
+	t.Run("name held by another owner", func(t *testing.T) {
+		cfg := h.agent
+		// A second label: same-owner requests are a takeover, not a refusal.
+		cfg.Token = otherToken
+		cfg.Subdomain = h.agent.Subdomain
+		_, err := client.Run(cfg)
+
+		var refused *client.Refusal
+		if !errors.As(err, &refused) {
+			t.Fatalf("err = %v (%T), want a *client.Refusal", err, err)
+		}
+		if refused.Code != proto.CodeTaken {
+			t.Errorf("code = %q, want %q", refused.Code, proto.CodeTaken)
+		}
+		if !refused.Retryable() {
+			t.Error("a taken name is terminal, want retryable")
+		}
+	})
+
+	t.Run("illegal name", func(t *testing.T) {
+		cfg := h.agent
+		cfg.Subdomain = "Not A Legal Label"
+		_, err := client.Run(cfg)
+
+		var refused *client.Refusal
+		if !errors.As(err, &refused) {
+			t.Fatalf("err = %v (%T), want a *client.Refusal", err, err)
+		}
+		if refused.Code != proto.CodeBadName {
+			t.Errorf("code = %q, want %q", refused.Code, proto.CodeBadName)
+		}
+		if refused.Retryable() {
+			t.Error("an illegal name is retryable, want terminal")
+		}
+	})
+}
+
+// An agent built before the code field reads the same refusals as before: the
+// sentence is unchanged and nothing decodes differently. The reverse skew —
+// this agent against a server too old to send a code — leaves Code empty,
+// which Retryable reports as terminal, i.e. exactly today's behaviour.
+func TestRefusalWithoutACodeIsTerminal(t *testing.T) {
+	refused := &client.Refusal{Reason: "subdomain is already in use"}
+	if refused.Retryable() {
+		t.Error("an uncoded refusal is retryable, want terminal")
+	}
+	if !errors.Is(refused, client.ErrRefused) {
+		t.Error("an uncoded refusal does not match ErrRefused")
+	}
+}
+
+// waitForListingWithout blocks until sub is no longer among the live tunnels,
+// i.e. until the server has noticed the session behind it is gone. A listing
+// shows bound tunnels only, so a name that has become a lease drops out of it.
+func (h *harness) waitForListingWithout(t *testing.T, sub string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		live, err := client.List(h.agent)
+		if err == nil {
+			found := false
+			for _, tn := range live {
+				if tn.Subdomain == sub {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("server still lists %q as live 10s after its transport was cut", sub)
+}
+
+// The milestone in one test: cut the network under a running tunnel, and the
+// name is still the same agent's when it comes back.
+func TestDroppedTunnelKeepsItsNameForItsOwner(t *testing.T) {
+	h := newHarness(t, false)
+
+	h.control.dropAll()
+	h.waitForListingWithout(t, "myapp")
+
+	// Nothing is serving it, so it does not route...
+	if code := h.status(t, "myapp", "/"); code != http.StatusServiceUnavailable {
+		t.Fatalf("held name answered %d, want %d", code, http.StatusServiceUnavailable)
+	}
+
+	// ...but it is not free either. Another owner is refused, with the code
+	// that says so.
+	other := h.agent
+	other.Token = otherToken
+	other.Subdomain = "myapp"
+	_, err := client.Run(other)
+	var refused *client.Refusal
+	if !errors.As(err, &refused) || refused.Code != proto.CodeTaken {
+		t.Fatalf("another owner took a held name: err = %v", err)
+	}
+
+	// The owner comes back and gets its URL, which is the whole point: the
+	// endpoint someone registered with Stripe an hour ago still works.
+	go client.Run(h.agent)
+	h.waitForTunnel(t)
+
+	if got := h.get(t, "myapp", "/echo"); got != "GET /echo " {
+		t.Fatalf("after reconnect: %q", got)
+	}
+}
+
+// A dropped tunnel holds its name against *other* owners, never against
+// itself: an agent that lost its session and came straight back must not be
+// made to wait out a window its own predecessor opened. That is what stops a
+// crash-looping agent from locking itself out of its own namespace, one fresh
+// grace window per attempt.
+func TestAnOwnerIsNeverBlockedByItsOwnHold(t *testing.T) {
+	h := newHarness(t, false)
+
+	for i := 0; i < 3; i++ {
+		h.control.dropAll()
+		h.waitForListingWithout(t, "myapp")
+
+		go client.Run(h.agent)
+		h.waitForTunnel(t)
+	}
+	if got := h.get(t, "myapp", "/echo"); got != "GET /echo " {
+		t.Fatalf("after three drops and reconnects: %q", got)
+	}
+}
+
+// Being refused is not a claim. A rejected request must not hold the name it
+// asked for, or asking for a name you cannot have would take it out of
+// circulation for everyone including the agent serving it.
+func TestARefusedClaimHoldsNothing(t *testing.T) {
+	h := newHarness(t, false)
+
+	other := h.agent
+	other.Token = otherToken
+	other.Subdomain = "myapp"
+	if _, err := client.Run(other); !errors.Is(err, client.ErrRefused) {
+		t.Fatalf("err = %v, want a refusal", err)
+	}
+
+	// The holder is undisturbed, and its own reconnect still works.
+	if got := h.get(t, "myapp", "/echo"); got != "GET /echo " {
+		t.Fatalf("after another owner was refused: %q", got)
+	}
+	h.control.dropAll()
+	h.waitForListingWithout(t, "myapp")
+	go client.Run(h.agent)
+	h.waitForTunnel(t)
+}
+
+// What a webhook sender sees while the agent is away. The distinction between
+// this and a 404 is the difference between "retry in a moment" and "this
+// endpoint is gone" — and senders act on it: a 404 gets a delivery dropped and
+// can get the endpoint disabled, while every sender that retries at all
+// retries on a 503.
+func TestHeldNameAnswers503WhileANameNobodyHasStays404(t *testing.T) {
+	h := newHarness(t, false)
+
+	h.control.dropAll()
+	h.waitForListingWithout(t, "myapp")
+
+	req, _ := http.NewRequest("GET", h.ingress.URL+"/webhook", nil)
+	req.Host = "myapp.localhost"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "5" {
+		t.Errorf("Retry-After = %q, want %q", got, "5")
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "myapp") {
+		t.Errorf("body does not name the tunnel: %q", body)
+	}
+
+	// A name nobody ever claimed is still a 404: it is not coming back,
+	// and telling a sender to retry it would be the same lie in reverse.
+	if code := h.status(t, "nobody-has-this", "/"); code != http.StatusNotFound {
+		t.Errorf("unclaimed name answered %d, want %d", code, http.StatusNotFound)
+	}
 }

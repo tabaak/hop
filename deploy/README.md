@@ -297,6 +297,69 @@ hop http 3000 --sub myapp
 
 Then `https://myapp.hop.vokh.dev` reaches `localhost:3000`.
 
+## Upgrading a running deployment
+
+Replacing the binary and restarting is the whole procedure. There is no
+migration, no new flag, and nothing in `/etc/hop` changes.
+
+```sh
+# On your laptop, from the repo. Match the VPS: uname -m → x86_64 = amd64,
+# aarch64 = arm64.
+GOOS=linux GOARCH=amd64 go build -o hopd ./cmd/hopd
+
+# Keep the running binary, so a rollback is a copy rather than a rebuild.
+ssh root@<VPS> 'cp /usr/local/bin/hopd /usr/local/bin/hopd.prev'
+
+scp hopd root@<VPS>:/usr/local/bin/hopd.new
+ssh root@<VPS> 'mv /usr/local/bin/hopd.new /usr/local/bin/hopd && systemctl restart hopd'
+journalctl -u hopd -f
+```
+
+`mv` within the same filesystem is atomic, and writing to a temporary name
+first avoids `ETXTBSY` from overwriting a file that is currently executing.
+
+A restart drops every live tunnel: the registry is in memory, so leases do not
+survive it either. Agents reconnect on their own, and since M6 they do so with
+full jitter from a window starting under a second, so a handful of them come
+back staggered rather than all at once. Watch for `tunnel up` lines returning
+in the log.
+
+Rollback is the same two commands in reverse:
+
+```sh
+ssh root@<VPS> 'cp /usr/local/bin/hopd.prev /usr/local/bin/hopd && systemctl restart hopd'
+```
+
+### Version skew
+
+Agents and `hopd` can be upgraded independently, in either order, and both
+mixed combinations have been tested end to end. Upgrade the server first: every
+M6 improvement except the goodbye is server-side, so old agents on a new `hopd`
+get the grace window for free.
+
+| Combination | Behaviour |
+|---|---|
+| **Old agent → new hopd** | Full grace window. The agent sends no goodbye, so even a deliberate stop holds its name for 45s; the same device reclaims it immediately on reconnect, and only a *different* label has to wait the window out. |
+| **New agent → old hopd** | Exactly the pre-M6 behaviour. The old server never accepts the goodbye stream, so it is discarded, and `HelloAck` arrives without a refusal code — which the agent reads as "don't retry", the way every refusal was treated before. The one visible artifact is that Ctrl-C pauses for its one-second bound waiting for an acknowledgement that is never coming. |
+
+Nothing about the handshake changed incompatibly: `Code` is a new optional
+field that older builds ignore, and the goodbye travels on a yamux stream
+rather than as a new op, precisely so a server that knows nothing about it
+discards it instead of misreading it as a request to claim a name.
+
+### Agents
+
+There is no packaging story yet; `hop` is a single binary that people copy
+where they want it.
+
+```sh
+go build -o hop ./cmd/hop
+install -m 755 hop /usr/local/bin/hop     # or ~/bin, or wherever
+```
+
+Nothing needs restarting in a particular order, and a tunnel running from the
+old binary keeps working until it is stopped.
+
 ## Renewal
 
 certmagic renews in the background, roughly 30 days before expiry, using the

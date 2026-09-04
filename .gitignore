@@ -4,3 +4,9 @@
 
 # Local Claude Code settings (machine-specific paths)
 .claude
+
+# Markdown files
+PLAN.md
+
+#Mac
+.DS_Store

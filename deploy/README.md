@@ -302,32 +302,46 @@ Then `https://myapp.hop.vokh.dev` reaches `localhost:3000`.
 Replacing the binary and restarting is the whole procedure. There is no
 migration, no new flag, and nothing in `/etc/hop` changes.
 
+The VPS has no Go toolchain, so the binary is always cross-compiled on the
+laptop and copied over. The SSH user is unprivileged and `/usr/local/bin` is
+root-owned, so the copy lands in the home directory first and `install` moves
+it into place.
+
 ```sh
 # On your laptop, from the repo. Match the VPS: uname -m → x86_64 = amd64,
-# aarch64 = arm64.
-GOOS=linux GOARCH=amd64 go build -o hopd ./cmd/hopd
+# aarch64 = arm64. The Oracle box is aarch64.
+GOOS=linux GOARCH=arm64 go build -o hopd ./cmd/hopd
+scp hopd oracle_vps:~/hopd.new
 
-# Keep the running binary, so a rollback is a copy rather than a rebuild.
-ssh root@<VPS> 'cp /usr/local/bin/hopd /usr/local/bin/hopd.prev'
-
-scp hopd root@<VPS>:/usr/local/bin/hopd.new
-ssh root@<VPS> 'mv /usr/local/bin/hopd.new /usr/local/bin/hopd && systemctl restart hopd'
-journalctl -u hopd -f
+ssh oracle_vps '
+  sudo cp /usr/local/bin/hopd /usr/local/bin/hopd.bak-$(date +%F) &&
+  sudo install -m 755 -o root -g root ~/hopd.new /usr/local/bin/hopd &&
+  rm ~/hopd.new &&
+  sudo systemctl restart hopd
+'
+ssh oracle_vps 'sudo journalctl -u hopd -f'
 ```
 
-`mv` within the same filesystem is atomic, and writing to a temporary name
-first avoids `ETXTBSY` from overwriting a file that is currently executing.
+`install` writes to a temporary file and renames it, so it neither hits
+`ETXTBSY` from overwriting a file that is currently executing nor leaves a
+half-written binary if the copy dies partway. Keeping the previous build under
+a dated name — the convention already on the box — makes a rollback a copy
+rather than a rebuild.
 
 A restart drops every live tunnel: the registry is in memory, so leases do not
 survive it either. Agents reconnect on their own, and since M6 they do so with
 full jitter from a window starting under a second, so a handful of them come
 back staggered rather than all at once. Watch for `tunnel up` lines returning
-in the log.
-
-Rollback is the same two commands in reverse:
+in the log. Check first whether anyone is connected:
 
 ```sh
-ssh root@<VPS> 'cp /usr/local/bin/hopd.prev /usr/local/bin/hopd && systemctl restart hopd'
+ssh oracle_vps 'sudo ss -tnp state established "( sport = :7443 )"'
+```
+
+Rollback is one command:
+
+```sh
+ssh oracle_vps 'sudo cp /usr/local/bin/hopd.bak-<date> /usr/local/bin/hopd && sudo systemctl restart hopd'
 ```
 
 ### Version skew

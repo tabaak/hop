@@ -32,9 +32,15 @@ const tokenPoll = 5 * time.Second
 func main() {
 	// One subcommand, handled before flag parsing since it shares none of the
 	// server's flags.
-	if len(os.Args) > 1 && os.Args[1] == "mint" {
-		mint(os.Args[2:])
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "mint":
+			mint(os.Args[2:])
+			return
+		case "version", "--version", "-version", "-v":
+			runVersion()
+			return
+		}
 	}
 
 	var (

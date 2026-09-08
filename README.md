@@ -9,8 +9,7 @@ on a VPS.
 automatically via ACME DNS-01. Live at `*.hop.vokh.dev`.
 
 ## hop — the agent
-
-Three subcommands. Anything else prints usage and exits 2.
+Commands:
 
 ```sh
 hop http <port> [flags]   # open a tunnel
@@ -18,6 +17,7 @@ hop ps [flags]            # list the tunnels currently up (aliases: ls, status)
 hop stop <tunnel>...      # stop tunnels running on this machine
 hop log <tunnel>          # read a detached tunnel's output (alias: logs)
 hop inspect <tunnel>      # open the request inspector for a running tunnel
+hop version               # print version information (aliases: --version, -v)
 ```
 
 A `<tunnel>` is named by its subdomain, its agent's PID, or the local port it

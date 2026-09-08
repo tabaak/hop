@@ -38,6 +38,11 @@ func main() {
 		runLog(args[1:])
 	case "inspect":
 		runInspect(args[1:])
+	case "version", "--version", "-version", "-v":
+		runVersion(args[1:])
+	case "help", "-h", "--help", "-help":
+		usage()
+		os.Exit(0)
 	default:
 		usage()
 		os.Exit(2)
@@ -288,6 +293,7 @@ usage:
   hop stop --all            stop all of them
   hop log <tunnel> [-f]     show a detached tunnel's output (also: logs)
   hop inspect <tunnel>      serve the request inspector for a running tunnel
+  hop version               print the version of hop (also: --version, -v)
 
   <tunnel> is its subdomain, its agent's pid, or the local port it serves.
 

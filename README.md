@@ -1,6 +1,6 @@
 # hop
 
-A fast, lightweight, self-hosted **ngrok alternative**. Expose local ports to the internet with automated TLS, custom subdomains, live terminal request logs, and a built-in web request inspector.
+A fast, lightweight, self-hosted **ngrok alternative**. Expose local ports to the internet with automated Let's Encrypt wildcard TLS, custom subdomains, live terminal request logs, and a built-in web request inspector.
 
 ```
 https://myapp.hop.vokh.dev  →  http://127.0.0.1:3000
@@ -12,10 +12,10 @@ https://myapp.hop.vokh.dev  →  http://127.0.0.1:3000
 
 - **🚀 Instant Public HTTPS:** Automatic Let's Encrypt wildcard TLS certificate over DNS-01.
 - **🔍 Built-in Request Inspector & Replay:** Watch requests live in your browser (`http://127.0.0.1:4040`), inspect headers/bodies, copy as cURL, or replay failed webhooks locally with one click.
-- **🪵 Beautiful Terminal Logs:** Color-coded request logs with method, status, client device detection, and time-to-first-byte response timing.
+- **🪵 Live Terminal Logs:** Color-coded request logs with HTTP method, status, client device detection, and time-to-first-byte measurements.
 - **⚡ Background Daemon Mode:** Detach tunnels into the background with `-d`, inspect or tail their logs with `hop log`, and stop them cleanly with `hop stop`.
 - **📱 Multi-Device Awareness:** `hop ps` lists active tunnels across all your registered devices (laptop, desktop, staging servers).
-- **🛡️ Resilient Reconnects:** Network drops keep your subdomain reserved for 45 seconds (returning HTTP 503 `Retry-After` to callers rather than 404), with full jitter exponential backoff.
+- **🛡️ Resilient Reconnects:** Temporary network drops keep your subdomain reserved for 45 seconds (returning HTTP 503 `Retry-After` to webhook callers rather than 404), with full-jitter exponential backoff.
 - **🔒 Secure by Design:** TLS required on public networks, unguessable 32-byte auth tokens stored only as SHA-256 hashes, and local inspector protected by loopback Host validation.
 
 ---
@@ -36,8 +36,6 @@ brew install hop
 
 ### Go Install
 
-If you have Go 1.22+ installed:
-
 ```sh
 go install hop.vokh.dev/cmd/hop@latest
 ```
@@ -48,7 +46,7 @@ go install hop.vokh.dev/cmd/hop@latest
 git clone https://github.com/<username>/hop.git
 cd hop
 go build -o hop ./cmd/hop
-sudo mv hop /usr/local/bin/
+sudo install -m 755 hop /usr/local/bin/hop
 ```
 
 Verify your installation:
@@ -59,6 +57,19 @@ hop version
 
 ---
 
+## 🎯 How Hop Works (Client vs. Server)
+
+Hop consists of two binaries:
+1. **`hop` (The Agent CLI):** Installed on your workstation/laptop. It connects out to a Hop server over TLS and tunnels local traffic.
+2. **`hopd` (The Server Daemon):** Runs on a VPS with a public IP. It handles public HTTP/HTTPS ingress, manages the wildcard TLS certificate via DNS-01, and multiplexes client tunnels.
+
+> [!NOTE]
+> **Using an existing Hop server?** If your team or organization already runs `hopd`, simply ask your administrator for the server address and a minted token, then jump straight to the **[Quickstart](#-quickstart)**.
+>
+> **Setting up your own server?** Hop is self-hosted—there is no shared public SaaS cluster. If you are running your own infrastructure, see the **[Self-Hosting Guide (`hopd`)](#-self-hosting-guide-hopd)** below before running the client.
+
+---
+
 ## 🚀 Quickstart
 
 ### 1. Set your credentials
@@ -66,7 +77,7 @@ hop version
 Add the server address and your agent token to your shell profile (`~/.zshrc` or `~/.bashrc`):
 
 ```sh
-export HOP_SERVER="hop.vokh.dev:7443"
+export HOP_SERVER="hop.yourdomain.com:7443"
 export HOP_TOKEN="<your-device-token>"
 ```
 
@@ -79,7 +90,7 @@ hop http 3000
 ```
 
 ```
-  https://calm-raven.hop.vokh.dev  →  http://127.0.0.1:3000
+  https://calm-raven.hop.yourdomain.com  →  http://127.0.0.1:3000
 
   GET    200      5ms  Mac Chrome      /
   POST   201      4ms  iPhone Safari   /api/checkout
@@ -89,24 +100,24 @@ Press `Ctrl-C` to gracefully shut down the tunnel and release your subdomain imm
 
 ---
 
-## 💻 Everyday Usage
+## 💻 Everyday Agent Usage (`hop`)
 
 ### Claim a Custom Subdomain
 
 ```sh
 hop http 3000 --sub myapp
-# https://myapp.hop.vokh.dev  →  http://127.0.0.1:3000
+# https://myapp.hop.yourdomain.com  →  http://127.0.0.1:3000
 ```
 
 ### Working with Modern Dev Servers (Vite, Next.js, Rails)
 
-Frameworks like Vite reject requests with unrecognized `Host` headers. Use `--host-header rewrite` to seamlessly forward the local host header:
+Frameworks like Vite reject requests with unrecognized `Host` headers. Use `--host-header rewrite` to seamlessly pass your local address:
 
 ```sh
 hop http 5173 --host-header rewrite
 ```
 
-Or specify an explicit host:
+Or specify an explicit host header:
 ```sh
 hop http 3000 --host-header app.internal
 ```
@@ -128,7 +139,7 @@ hop http 3000 --sub myapp -d
 ```
 
 ```
-  https://myapp.hop.vokh.dev  →  http://127.0.0.1:3000
+  https://myapp.hop.yourdomain.com  →  http://127.0.0.1:3000
 
   detached, pid 55899. hop log myapp for the request log,
   hop inspect myapp to watch requests in a browser, hop stop myapp to end it.
@@ -145,7 +156,8 @@ hop log myapp -n 200   # View last 200 lines
 hop log myapp -f       # Stream logs in real-time (follow)
 ```
 
-Log files are stored at `~/.hop/log/<pid>.log` and cleaned up automatically after two weeks.
+- Logs for detached agents are saved to `~/.hop/log/<pid>.log` as plain text (no ANSI escape codes corrupting the file). Color is re-applied dynamically when reading via `hop log`.
+- Inactive logs are automatically pruned after two weeks.
 
 ### Managing & Stopping Tunnels
 
@@ -169,9 +181,9 @@ hop ps
 
 ```
   NAME        OWNER   UP       PID      FORWARDS TO      URL
-  blog        phone   4h12m    -        10.0.0.9:5173    https://blog.hop.vokh.dev
-  calm-raven  laptop  38s      55901    127.0.0.1:3000   https://calm-raven.hop.vokh.dev
-  myapp       laptop  2d3h     55899    127.0.0.1:3000   https://myapp.hop.vokh.dev
+  blog        phone   4h12m    -        10.0.0.9:5173    https://blog.hop.yourdomain.com
+  calm-raven  laptop  38s      55901    127.0.0.1:3000   https://calm-raven.hop.yourdomain.com
+  myapp       laptop  2d3h     55899    127.0.0.1:3000   https://myapp.hop.yourdomain.com
 
   3 tunnel(s) up.
 ```
@@ -186,7 +198,7 @@ hop ps --json | jq -r '.[] | select(.owner == "laptop") | .url'
 
 ## 🔍 Request Inspector
 
-Every tunnel continuously records its last 50 HTTP exchanges in memory. You can launch the web inspector interface anytime:
+Every tunnel continuously records its last 50 HTTP exchanges in memory (capped at 64KB per request/response body). You can launch the web inspector interface anytime:
 
 ```sh
 # Start tunnel with inspector opened from launch:
@@ -199,27 +211,242 @@ hop inspect 3000
 
 The inspector runs on `http://127.0.0.1:4040` and provides:
 - **Live Stream:** Real-time request and response feeds via Server-Sent Events (SSE).
-- **Headers & Bodies:** Full request and response inspection (up to 64KB per payload).
+- **Headers & Bodies:** Full request and response inspection.
 - **🔁 Replay Request:** Send recorded requests directly to your local application with one click—perfect for debugging webhooks without asking the sender to re-fire.
 - **📋 Copy as cURL:** Export public cURL commands for reproduction or sharing.
 - **Security:** Binds strictly to `127.0.0.1` and blocks non-loopback `Host` headers to prevent DNS rebinding attacks.
 
 ---
 
+## 🖥️ Self-Hosting Guide (`hopd`)
+
+Setting up your own Hop server requires a Linux VPS with a public IP, a domain with DNS hosted on Cloudflare, and about 10 minutes.
+
+### 1. DNS Configuration
+
+Create two **A** records pointing to your VPS IP:
+
+| Type | Name | Content | Proxy Status |
+|------|------|---------|--------------|
+| A | `hop` | `<VPS_IP>` | **DNS only (Grey Cloud)** |
+| A | `*.hop` | `<VPS_IP>` | **DNS only (Grey Cloud)** |
+
+> [!IMPORTANT]
+> Cloudflare proxy (Orange Cloud) **must be OFF**. Cloudflare's proxy terminates TLS itself, which blocks hopd from solving the ACME challenge and prevents end-to-end TLS.
+
+Verify DNS propagation before continuing:
+```sh
+dig +short hop.yourdomain.com
+dig +short anything.hop.yourdomain.com
+```
+
+### 2. Create Scoped Cloudflare API Token
+
+A wildcard certificate (`*.hop.yourdomain.com`) **cannot** be validated via HTTP-01; it requires the ACME **DNS-01** challenge. `hopd` needs permission to create temporary TXT records.
+
+In Cloudflare Dashboard → **My Profile** → **API Tokens** → **Create Token** → **Custom Token**:
+- **Permissions:**
+  - `Zone` → `DNS` → `Edit`
+  - `Zone` → `Zone` → `Read`
+- **Zone Resources:**
+  - `Include` → `Specific zone` → `<yourdomain.com>`
+
+*(Both permissions are required: `Zone:Read` locates the zone ID, and `DNS:Edit` creates the verification record).*
+
+### 3. Open Firewall Ports
+
+`hopd` listens on three ports:
+- `80/tcp`: HTTP to HTTPS redirect
+- `443/tcp`: Public HTTPS ingress for tunnels
+- `7443/tcp`: Agent control connection (TLS)
+
+```sh
+sudo ufw allow 22/tcp     # Don't lock yourself out!
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 7443/tcp
+sudo ufw enable
+```
+
+*(Note: On Oracle Cloud or AWS, also ensure ingress rules for 80, 443, and 7443 are allowed in the Cloud Security List / Security Group).*
+
+### 4. Build and Install `hopd`
+
+Cross-compile locally and copy to your VPS:
+
+```sh
+# For Intel/AMD VPS (x86_64)
+GOOS=linux GOARCH=amd64 go build -o hopd ./cmd/hopd
+
+# For ARM VPS (Hetzner ARM, Oracle Ampere, AWS Graviton)
+GOOS=linux GOARCH=arm64 go build -o hopd ./cmd/hopd
+
+scp hopd root@<VPS_IP>:/usr/local/bin/hopd
+```
+
+On your VPS:
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin hop
+sudo chmod 755 /usr/local/bin/hopd
+
+# Create directories and store Cloudflare secret
+sudo mkdir -p /etc/hop /var/lib/hop/certs
+sudo chown hop:hop /var/lib/hop/certs
+sudo chmod 700 /var/lib/hop/certs
+
+sudo bash -c 'cat > /etc/hop/hopd.env <<EOF
+CLOUDFLARE_API_TOKEN=<your-scoped-cloudflare-token>
+EOF'
+sudo chmod 600 /etc/hop/hopd.env
+```
+
+### 5. Mint Device Tokens
+
+`hopd` refuses to start without valid tokens configured. Generate tokens with `hopd mint <device-name>`:
+
+```sh
+# On the VPS:
+hopd mint laptop
+```
+
+This outputs:
+1. **The secret token:** Copy this to your laptop (used in `HOP_TOKEN`).
+2. **The hashed config line:** Put this in `/etc/hop/tokens`.
+
+```sh
+sudo touch /etc/hop/tokens
+sudo chown root:hop /etc/hop/tokens
+sudo chmod 640 /etc/hop/tokens
+
+# Add the minted token line to /etc/hop/tokens:
+echo 'laptop  sha256:<hash>' | sudo tee -a /etc/hop/tokens
+```
+
+> [!TIP]
+> **Zero-downtime token management:** `/etc/hop/tokens` is polled every 5 seconds. You can mint new device tokens or revoke compromised ones anytime without restarting `hopd`. Revoking a token terminates active tunnels immediately.
+
+### 6. Install Systemd Service (Staging Test First!)
+
+Let's Encrypt has a strict limit of 5 duplicate certificates per week. Always test against the Staging CA first!
+
+Copy the systemd unit from [`deploy/hopd.service`](deploy/hopd.service):
+
+```sh
+sudo cp deploy/hopd.service /etc/systemd/system/hopd.service
+```
+
+Edit `/etc/systemd/system/hopd.service` with your domain and email:
+```ini
+[Unit]
+Description=hop server
+After=network.target
+
+[Service]
+Type=simple
+User=hop
+Group=hop
+EnvironmentFile=/etc/hop/hopd.env
+ExecStart=/usr/local/bin/hopd \
+    -domain hop.yourdomain.com \
+    -email you@example.com \
+    -tokens-file /etc/hop/tokens \
+    -cert-dir /var/lib/hop/certs \
+    -staging=true
+
+Restart=always
+RestartSec=5s
+LimitNOFILE=65535
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=hop/certs
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Start the service and check the logs:
+```sh
+sudo systemctl daemon-reload
+sudo systemctl start hopd
+sudo journalctl -u hopd -f
+```
+
+Look for `obtaining certificate ...` followed by `certificate ready`. That confirms your DNS-01 challenge succeeded!
+
+### 7. Switch to Production Certificates
+
+Once the staging challenge succeeds:
+1. Edit `/etc/systemd/system/hopd.service` to set `-staging=false`.
+2. Clear the staging certificates and restart:
+
+```sh
+sudo rm -rf /var/lib/hop/certs/*
+sudo systemctl daemon-reload
+sudo systemctl restart hopd
+sudo systemctl enable hopd
+```
+
+Verify your server from your laptop:
+```sh
+curl -I https://hop.yourdomain.com
+```
+*(An HTTP 404 response with valid TLS certificate confirms everything is running perfectly!)*
+
+---
+
+### Alternative Topology: Running Behind Existing Reverse Proxy (Caddy / Nginx)
+
+If your VPS already runs websites on `:80` and `:443` (e.g. via Dockerized Caddy):
+- The existing proxy terminates wildcard TLS on `:443` and reverse-proxies `*.hop.yourdomain.com` traffic to `hopd` on an internal address (e.g. `172.17.0.1:8080`).
+- `hopd` terminates TLS on `:7443` directly (agent control protocol cannot be proxied as HTTP).
+- Run `hopd` with:
+  ```sh
+  hopd -domain hop.yourdomain.com -ingress 172.17.0.1:8080 -ingress-tls=false -scheme https -control :7443
+  ```
+See **[`deploy/README.md`](deploy/README.md#4b-behind-an-existing-caddy)** for complete Caddyfile and Docker Compose configurations.
+
+---
+
+## 🧪 Local Offline Development
+
+You can test Hop end-to-end on your local machine without a VPS, domain, or TLS certificates:
+
+```sh
+# Terminal 1: Run a mock web service
+python3 -m http.server 3000
+
+# Terminal 2: Run hopd locally (plaintext mode)
+go run ./cmd/hopd -ingress-tls=false -control-tls=false \
+    -domain localhost -ingress :8080 -public-port 8080 -tokens dev-token
+
+# Terminal 3: Run the hop client
+go run ./cmd/hop http 3000 --sub myapp --token dev-token --server localhost:7443 --no-tls
+```
+
+Test the connection:
+```sh
+curl -H "Host: myapp.localhost" http://127.0.0.1:8080/
+```
+
+---
+
+## 🧠 Architecture & Behaviour Worth Knowing
+
+- **Wildcard certificates require DNS-01:** There is no HTTP-01 path to issue wildcard certificates (`*.yourdomain.com`). `hopd` disables non-DNS challenge types so errors fail immediately and loudly.
+- **Staging is the default:** `-staging` defaults to `true` to protect your domain from Let's Encrypt production rate limits while setting up DNS tokens.
+- **One agent per subdomain:** Tunnels are scoped to token labels. If a connection drops, a new agent under the *same token label* reclaims the name immediately. An agent with a *different* token label is refused.
+- **45-Second Grace Hold:** If an agent temporarily drops connection, the server preserves its subdomain for 45 seconds. Requests arriving in the interim receive **HTTP 503 `Retry-After: 5`** instead of 404, preventing webhook providers from dropping or deactivating endpoints.
+- **Instant Intentional Teardown:** Explicit exits (`Ctrl-C` or `hop stop`) send a protocol `Bye` frame, releasing subdomains immediately so they can be reused without waiting out the grace window.
+- **Full Jitter Exponential Backoff:** Reconnects draw random waits from an exponential window (1s to 30s) to prevent thundering herd storms when a server reboots.
+- **Private Peer Plaintext Guard:** `--no-tls` strictly blocks connections unless the peer is a loopback or private network address (RFC 1918, CGNAT `100.64.0.0/10`, IPv6 ULA) to prevent transmitting tokens in plaintext over the internet.
+- **Local Inspector Security:** The inspector binds exclusively to `127.0.0.1` and drops any request whose `Host` is not a loopback address, protecting against DNS rebinding attacks.
+
+---
+
 ## 🛠️ CLI Reference
 
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `hop http <port> [flags]` | Open a public tunnel to a local port |
-| `hop ps [flags]` | List all running tunnels (`aliases: ls, status`) |
-| `hop stop <tunnel>...` | Stop tunnels running on this machine |
-| `hop log <tunnel> [flags]` | View output of a background tunnel (`alias: logs`) |
-| `hop inspect <tunnel>` | Open the web request inspector in your browser |
-| `hop version [flags]` | Print version information (`aliases: --version, -v`) |
-
-### Flags
+### `hop` (Agent) Flags
 
 | Flag | Default | Applies To | Description |
 |------|---------|------------|-------------|
@@ -240,26 +467,7 @@ The inspector runs on `http://127.0.0.1:4040` and provides:
 | `--no-color` | `false` | all | Disable ANSI colors (also honors `$NO_COLOR`) |
 | `--no-tls` | `false` | `http`, `ps` | Connect without TLS (allowed on private/loopback networks only) |
 
----
-
-## 🖥️ Server Deployment (`hopd`)
-
-`hopd` is the server daemon that runs on your VPS or cloud instance. It manages public HTTP/HTTPS ingress, issues wildcard certificates via Let's Encrypt DNS-01, and multiplexes agent tunnels over Yamux.
-
-### Quick Deployment Overview
-
-See **[`deploy/`](deploy/)** for the step-by-step production deployment guide (systemd service, Cloudflare DNS-01 tokens, and unprivileged user setup).
-
-```sh
-# Run standalone (terminates TLS on 80 & 443 with wildcard cert)
-hopd -domain hop.vokh.dev -email you@example.com -staging=false
-
-# Run behind an existing reverse proxy (e.g. Caddy/Nginx)
-hopd -domain hop.vokh.dev -email you@example.com -staging=false \
-    -ingress 172.17.0.1:8080 -ingress-tls=false -scheme https -control :7443
-```
-
-#### Server Flags
+### `hopd` (Server) Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -277,61 +485,12 @@ hopd -domain hop.vokh.dev -email you@example.com -staging=false \
 | `-staging` | `true` | Use Let's Encrypt Staging CA (`false` for production) |
 | `-cert-dir` | `/var/lib/hop/certs` | Directory for ACME account keys and certificates |
 
-
-### Managing Device Tokens
-
-Agent credentials are authenticated via hashed tokens in `/etc/hop/tokens`:
-
-```sh
-# Generate a new token for your laptop:
-hopd mint laptop
-```
-
-This displays the token for the device and appends the SHA-256 hash to `/etc/hop/tokens`.
-- **Zero-downtime reloads:** The file is polled every 5 seconds; tokens can be added or revoked without restarting the server.
-- **Immediate revocation:** Deleting a token line terminates active tunnels instantly.
-
----
-
-## 🧪 Local Development
-
-You can test Hop entirely on your machine without a VPS, domain, or TLS certificates:
-
-```sh
-# Terminal 1: Run a dummy local web service
-python3 -m http.server 3000
-
-# Terminal 2: Run hopd server locally
-go run ./cmd/hopd -ingress-tls=false -control-tls=false \
-    -domain localhost -ingress :8080 -public-port 8080 -tokens dev-token
-
-# Terminal 3: Connect the hop client
-go run ./cmd/hop http 3000 --sub myapp --token dev-token --server localhost:7443 --no-tls
-```
-
-Test the connection:
-```sh
-curl -H "Host: myapp.localhost" http://127.0.0.1:8080/
-```
-
----
-
-## 🧠 Architecture & Design Highlights
-
-- **DNS-01 ACME Wildcards:** Wildcard TLS certificates (`*.yourdomain.com`) are generated automatically via Let's Encrypt DNS-01 challenge.
-- **45-Second Grace Hold:** If an agent temporarily drops or switches Wi-Fi networks, its subdomain is held for 45 seconds. Inbound webhooks receive HTTP 503 (`Retry-After`) rather than 404, preventing webhook providers from disabling endpoints.
-- **Instant Intentional Teardown:** Explicit exits (`Ctrl-C` or `hop stop`) send a protocol `Bye` frame, releasing subdomains immediately so they can be reused without delay.
-- **Full Jitter Exponential Backoff:** Automatic reconnects back off with randomised jitter to avoid thundering herd spikes when a server reboots.
-- **Private Peer Plaintext Guard:** `--no-tls` is strictly blocked unless connecting to private or loopback IP ranges (RFC 1918, CGNAT, Tailscale, IPv6 ULA) to prevent credential leakage.
-
 ---
 
 ## 🧪 Tests
 
-Run the comprehensive test suite with the race detector:
+Run the complete test suite with race detection:
 
 ```sh
 go test -race ./...
 ```
-
-Covers token minting/revocation, registry claims, yaml/mux protocol framing, request logging, inspector ring buffers, SSE live feeds, request replay, and end-to-end TLS tunnels.

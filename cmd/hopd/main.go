@@ -62,6 +62,8 @@ func main() {
 		email        = flag.String("email", envOr("HOP_EMAIL", envOr("EMAIL", "")), "ACME account email for expiry notices")
 		staging      = flag.Bool("staging", envBool("HOP_STAGING", envBool("STAGING", true)), "use the Let's Encrypt staging CA; set false for real certificates")
 		certDir      = flag.String("cert-dir", envOr("HOP_CERT_DIR", "/var/lib/hop/certs"), "directory for the ACME account key and certificates")
+		tlsCert      = flag.String("tls-cert", envOr("HOP_TLS_CERT", ""), "path to custom TLS certificate fullchain.pem (skips ACME/Cloudflare)")
+		tlsKey       = flag.String("tls-key", envOr("HOP_TLS_KEY", ""), "path to custom TLS private key.pem")
 	)
 	flag.Parse()
 
@@ -100,7 +102,19 @@ func main() {
 	// obtaining if we serve tunnel traffic ourselves; behind a proxy the proxy
 	// holds it and we need just the bare name for the control listener.
 	var tlsCfg *tls.Config
-	if *ingressTLS || *controlTLS {
+	if *tlsCert != "" || *tlsKey != "" {
+		if *tlsCert == "" || *tlsKey == "" {
+			log.Fatal("certificates: both -tls-cert and -tls-key must be provided")
+		}
+		cert, err := tls.LoadX509KeyPair(*tlsCert, *tlsKey)
+		if err != nil {
+			log.Fatalf("certificates: loading keypair: %v", err)
+		}
+		tlsCfg = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+		log.Printf("using custom TLS certificate from %s", *tlsCert)
+	} else if *ingressTLS || *controlTLS {
 		if *staging {
 			log.Print("using the Let's Encrypt STAGING CA — browsers will not trust these certificates")
 		} else {

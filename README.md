@@ -450,6 +450,37 @@ curl -I https://hop.yourdomain.com
 
 ---
 
+### 🌐 What If Your DNS Is Not on Cloudflare?
+
+You have three straightforward options:
+
+#### Option 1: Point Your Domain's Nameservers to Cloudflare (Free)
+You **do not need to transfer your domain registration** or pay Cloudflare anything. Regardless of where you bought your domain (Namecheap, GoDaddy, Porkbun, Google Domains, etc.), you can keep your registrar and simply set the domain's NS (nameserver) records to Cloudflare's free DNS. Cloudflare DNS is 100% free and takes 2 minutes.
+
+#### Option 2: Bring Your Own Certificate (`-tls-cert` & `-tls-key`)
+If you manage DNS with AWS Route 53, DigitalOcean, Porkbun, DuckDNS, or another provider, you can generate your own wildcard certificate using **Certbot** or **acme.sh** via your provider's DNS plugin:
+
+```sh
+# Example using Certbot with Route53:
+certbot certonly --dns-route53 -d "hop.yourdomain.com" -d "*.hop.yourdomain.com"
+```
+
+Then supply the certificate and private key directly to `hopd`:
+```sh
+hopd -domain hop.yourdomain.com \
+     -tls-cert /etc/letsencrypt/live/hop.yourdomain.com/fullchain.pem \
+     -tls-key /etc/letsencrypt/live/hop.yourdomain.com/privkey.pem
+```
+*(Or in Docker via `HOP_TLS_CERT` and `HOP_TLS_KEY` environment variables).* `hopd` loads your certificate directly and skips ACME entirely.
+
+#### Option 3: Run Behind an Existing Reverse Proxy (Caddy / Nginx / Traefik)
+If your VPS already runs Caddy, Traefik, or Nginx with plugins for your DNS provider, let that proxy handle the wildcard TLS certificate and forward HTTP ingress traffic to `hopd`:
+- Run `hopd` with `-ingress-tls=false -ingress 127.0.0.1:8080 -scheme https`.
+- For `hopd`'s control port (`:7443`), either pass `-tls-cert`/`-tls-key` or let `hopd` obtain a single-name cert.
+See **[`deploy/README.md`](deploy/README.md#4b-behind-an-existing-caddy)** for complete configurations.
+
+---
+
 ### Alternative Topology: Running Behind Existing Reverse Proxy (Caddy / Nginx)
 
 If your VPS already runs websites on `:80` and `:443` (e.g. via Dockerized Caddy):
@@ -539,6 +570,8 @@ curl -H "Host: myapp.localhost" http://127.0.0.1:8080/
 | `-email` | *(empty)* | ACME contact email for Let's Encrypt expiry notices |
 | `-staging` | `true` | Use Let's Encrypt Staging CA (`false` for production) |
 | `-cert-dir` | `/var/lib/hop/certs` | Directory for ACME account keys and certificates |
+| `-tls-cert` | *(empty)* | Path to custom TLS certificate fullchain.pem (skips ACME/Cloudflare) |
+| `-tls-key` | *(empty)* | Path to custom TLS private key.pem |
 
 ---
 

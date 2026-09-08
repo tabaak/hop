@@ -14,8 +14,10 @@ services:
       - DOMAIN=${DOMAIN:-hop.example.com}
       - EMAIL=${EMAIL:-}
       - STAGING=${STAGING:-true}
-      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
       - HOP_TOKENS=${HOP_TOKENS:-}
+      - HOP_TLS_CERT=${HOP_TLS_CERT:-}
+      - HOP_TLS_KEY=${HOP_TLS_KEY:-}
     volumes:
       - hopd-certs:/var/lib/hop/certs
       - hopd-tokens:/etc/hop

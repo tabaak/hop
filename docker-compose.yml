@@ -1,0 +1,25 @@
+services:
+  hopd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hopd:latest
+    container_name: hopd
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "7443:7443"
+    environment:
+      - DOMAIN=${DOMAIN:-hop.example.com}
+      - EMAIL=${EMAIL:-}
+      - STAGING=${STAGING:-true}
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+      - HOP_TOKENS=${HOP_TOKENS:-}
+    volumes:
+      - hopd-certs:/var/lib/hop/certs
+      - hopd-tokens:/etc/hop
+
+volumes:
+  hopd-certs:
+  hopd-tokens:

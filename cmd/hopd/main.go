@@ -43,20 +43,25 @@ func main() {
 		}
 	}
 
+	defaultTokensFile := ""
+	if _, err := os.Stat("/etc/hop/tokens"); err == nil {
+		defaultTokensFile = "/etc/hop/tokens"
+	}
+
 	var (
-		ingressAddr  = flag.String("ingress", ":443", "public ingress address")
-		redirectAddr = flag.String("redirect", ":80", "address serving the HTTP-to-HTTPS redirect; empty to disable")
-		controlAddr  = flag.String("control", ":7443", "agent control address")
-		ingressTLS   = flag.Bool("ingress-tls", true, "terminate TLS on the ingress; false when behind a reverse proxy")
-		controlTLS   = flag.Bool("control-tls", true, "terminate TLS on the control listener")
-		scheme       = flag.String("scheme", "", "scheme for agent-facing URLs (default: https when -ingress-tls, else http)")
-		domain       = flag.String("domain", "hop.vokh.dev", "zone tunnels live under")
-		publicPort   = flag.String("public-port", "", "port appended to agent-facing URLs; empty for the scheme default")
-		tokensFile   = flag.String("tokens-file", "", "file of `label sha256:hash` lines, reloaded when it changes")
+		ingressAddr  = flag.String("ingress", envOr("HOP_INGRESS", ":443"), "public ingress address")
+		redirectAddr = flag.String("redirect", envOr("HOP_REDIRECT", ":80"), "address serving the HTTP-to-HTTPS redirect; empty to disable")
+		controlAddr  = flag.String("control", envOr("HOP_CONTROL", ":7443"), "agent control address")
+		ingressTLS   = flag.Bool("ingress-tls", envBool("HOP_INGRESS_TLS", true), "terminate TLS on the ingress; false when behind a reverse proxy")
+		controlTLS   = flag.Bool("control-tls", envBool("HOP_CONTROL_TLS", true), "terminate TLS on the control listener")
+		scheme       = flag.String("scheme", envOr("HOP_SCHEME", ""), "scheme for agent-facing URLs (default: https when -ingress-tls, else http)")
+		domain       = flag.String("domain", envOr("HOP_DOMAIN", envOr("DOMAIN", "hop.vokh.dev")), "zone tunnels live under")
+		publicPort   = flag.String("public-port", envOr("HOP_PUBLIC_PORT", ""), "port appended to agent-facing URLs; empty for the scheme default")
+		tokensFile   = flag.String("tokens-file", envOr("HOP_TOKENS_FILE", defaultTokensFile), "file of `label sha256:hash` lines, reloaded when it changes")
 		tokensFlag   = flag.String("tokens", "", "comma-separated agent tokens (or set HOP_TOKENS)")
-		email        = flag.String("email", "", "ACME account email for expiry notices")
-		staging      = flag.Bool("staging", true, "use the Let's Encrypt staging CA; set false for real certificates")
-		certDir      = flag.String("cert-dir", "/var/lib/hop/certs", "directory for the ACME account key and certificates")
+		email        = flag.String("email", envOr("HOP_EMAIL", envOr("EMAIL", "")), "ACME account email for expiry notices")
+		staging      = flag.Bool("staging", envBool("HOP_STAGING", envBool("STAGING", true)), "use the Let's Encrypt staging CA; set false for real certificates")
+		certDir      = flag.String("cert-dir", envOr("HOP_CERT_DIR", "/var/lib/hop/certs"), "directory for the ACME account key and certificates")
 	)
 	flag.Parse()
 
@@ -220,4 +225,23 @@ func envTokens(flagVal string) map[string]string {
 		out[h] = "env-" + h[:8]
 	}
 	return out
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		switch strings.ToLower(v) {
+		case "1", "t", "true", "yes", "y":
+			return true
+		case "0", "f", "false", "no", "n":
+			return false
+		}
+	}
+	return fallback
 }

@@ -270,7 +270,62 @@ sudo ufw enable
 
 *(Note: On Oracle Cloud or AWS, also ensure ingress rules for 80, 443, and 7443 are allowed in the Cloud Security List / Security Group).*
 
-### 4. Build and Install `hopd`
+---
+
+### Option A: Deploy with Docker Compose (Recommended)
+
+The fastest and cleanest way to run `hopd` in production.
+
+#### 1. Configure `.env`
+Copy the example environment file:
+```sh
+cp .env.example .env
+```
+
+Fill in your domain and Cloudflare token:
+```env
+DOMAIN=hop.yourdomain.com
+CLOUDFLARE_API_TOKEN=your-cloudflare-api-token
+EMAIL=you@example.com
+STAGING=true
+```
+
+#### 2. Start the Container
+```sh
+docker compose up -d
+docker compose logs -f
+```
+
+Look for `obtaining certificate ...` and `certificate ready` in the logs.
+
+#### 3. Mint Your Agent Token
+Mint an agent token directly inside the container and append it to the tokens volume:
+```sh
+docker compose exec hopd hopd mint laptop -a /etc/hop/tokens
+```
+This prints the secret token for your laptop (`export HOP_TOKEN="..."`) and automatically activates it on the server within 5 seconds without restarting the container!
+
+#### 4. Switch to Production Certificates
+Once staging succeeds, edit `.env` to set `STAGING=false`, clear the staging certs, and recreate the container:
+```sh
+docker compose down
+docker compose run --rm --entrypoint rm hopd -rf /var/lib/hop/certs/*
+docker compose up -d
+```
+
+Verify from your laptop:
+```sh
+curl -I https://hop.yourdomain.com
+# HTTP/2 404 (Healthy response — TLS terminated correctly!)
+```
+
+---
+
+### Option B: Bare Metal Systemd Setup
+
+If you prefer running `hopd` natively without Docker:
+
+#### 1. Build and Install `hopd`
 
 Cross-compile locally and copy to your VPS:
 

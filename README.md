@@ -25,12 +25,12 @@ https://myapp.hop.vokh.dev  →  http://127.0.0.1:3000
 ### Homebrew (macOS / Linux)
 
 ```sh
-brew install <username>/tap/hop
+brew install tabaak/tap/hop
 ```
 
 *(Or tap your repository and install):*
 ```sh
-brew tap <username>/hop
+brew tap tabaak/hop
 brew install hop
 ```
 
@@ -43,7 +43,7 @@ go install hop.vokh.dev/cmd/hop@latest
 ### From Source
 
 ```sh
-git clone https://github.com/<username>/hop.git
+git clone https://github.com/tabaak/hop.git
 cd hop
 go build -o hop ./cmd/hop
 sudo install -m 755 hop /usr/local/bin/hop
@@ -276,13 +276,22 @@ sudo ufw enable
 
 The fastest and cleanest way to run `hopd` in production.
 
-#### 1. Configure `.env`
-Copy the example environment file:
+#### 1. Set up project directory on your VPS
 ```sh
+# Clone the repository:
+git clone https://github.com/tabaak/hop.git
+cd hop
+cp .env.example .env
+
+# Or without git (download files directly):
+mkdir -p hop && cd hop
+curl -sO https://raw.githubusercontent.com/tabaak/hop/main/docker-compose.yml
+curl -sO https://raw.githubusercontent.com/tabaak/hop/main/.env.example
 cp .env.example .env
 ```
 
-Fill in your domain and Cloudflare token:
+#### 2. Configure `.env`
+Edit `.env` with your domain and Cloudflare token:
 ```env
 DOMAIN=hop.yourdomain.com
 CLOUDFLARE_API_TOKEN=your-cloudflare-api-token
@@ -290,7 +299,7 @@ EMAIL=you@example.com
 STAGING=true
 ```
 
-#### 2. Start the Container
+#### 3. Start the Container
 ```sh
 docker compose up -d
 docker compose logs -f
@@ -298,14 +307,14 @@ docker compose logs -f
 
 Look for `obtaining certificate ...` and `certificate ready` in the logs.
 
-#### 3. Mint Your Agent Token
+#### 4. Mint Your Agent Token
 Mint an agent token directly inside the container and append it to the tokens volume:
 ```sh
 docker compose exec hopd hopd mint laptop -a /etc/hop/tokens
 ```
 This prints the secret token for your laptop (`export HOP_TOKEN="..."`) and automatically activates it on the server within 5 seconds without restarting the container!
 
-#### 4. Switch to Production Certificates
+#### 5. Switch to Production Certificates
 Once staging succeeds, edit `.env` to set `STAGING=false`, clear the staging certs, and recreate the container:
 ```sh
 docker compose down
@@ -325,7 +334,7 @@ curl -I https://hop.yourdomain.com
 
 If you prefer running `hopd` natively without Docker:
 
-#### 1. Build and Install `hopd`
+#### 1. Build and Install Binary
 
 Cross-compile locally and copy to your VPS:
 
@@ -338,6 +347,8 @@ GOOS=linux GOARCH=arm64 go build -o hopd ./cmd/hopd
 
 scp hopd root@<VPS_IP>:/usr/local/bin/hopd
 ```
+
+#### 2. System User & Storage Directories
 
 On your VPS:
 ```sh
@@ -355,7 +366,7 @@ EOF'
 sudo chmod 600 /etc/hop/hopd.env
 ```
 
-### 5. Mint Device Tokens
+#### 3. Mint Device Tokens
 
 `hopd` refuses to start without valid tokens configured. Generate tokens with `hopd mint <device-name>`:
 
@@ -378,9 +389,9 @@ echo 'laptop  sha256:<hash>' | sudo tee -a /etc/hop/tokens
 ```
 
 > [!TIP]
-> **Zero-downtime token management:** `/etc/hop/tokens` is polled every 5 seconds. You can mint new device tokens or revoke compromised ones anytime without restarting `hopd`. Revoking a token terminates active tunnels immediately.
+> **Zero-downtime token management:** `/etc/hop/tokens` is polled every 5 seconds. You can mint new device tokens or revoke compromised ones anytime without restarting `hopd` (or use `hopd mint laptop -a /etc/hop/tokens` to append directly). Revoking a token terminates active tunnels immediately.
 
-### 6. Install Systemd Service (Staging Test First!)
+#### 4. Install Systemd Service (Staging Test First!)
 
 Let's Encrypt has a strict limit of 5 duplicate certificates per week. Always test against the Staging CA first!
 
@@ -429,7 +440,7 @@ sudo journalctl -u hopd -f
 
 Look for `obtaining certificate ...` followed by `certificate ready`. That confirms your DNS-01 challenge succeeded!
 
-### 7. Switch to Production Certificates
+#### 5. Switch to Production Certificates
 
 Once the staging challenge succeeds:
 1. Edit `/etc/systemd/system/hopd.service` to set `-staging=false`.
@@ -474,18 +485,9 @@ hopd -domain hop.yourdomain.com \
 *(Or in Docker via `HOP_TLS_CERT` and `HOP_TLS_KEY` environment variables).* `hopd` loads your certificate directly and skips ACME entirely.
 
 #### Option 3: Run Behind an Existing Reverse Proxy (Caddy / Nginx / Traefik)
-If your VPS already runs Caddy, Traefik, or Nginx with plugins for your DNS provider, let that proxy handle the wildcard TLS certificate and forward HTTP ingress traffic to `hopd`:
-- Run `hopd` with `-ingress-tls=false -ingress 127.0.0.1:8080 -scheme https`.
-- For `hopd`'s control port (`:7443`), either pass `-tls-cert`/`-tls-key` or let `hopd` obtain a single-name cert.
-See **[`deploy/README.md`](deploy/README.md#4b-behind-an-existing-caddy)** for complete configurations.
-
----
-
-### Alternative Topology: Running Behind Existing Reverse Proxy (Caddy / Nginx)
-
 If your VPS already runs websites on `:80` and `:443` (e.g. via Dockerized Caddy):
 - The existing proxy terminates wildcard TLS on `:443` and reverse-proxies `*.hop.yourdomain.com` traffic to `hopd` on an internal address (e.g. `172.17.0.1:8080`).
-- `hopd` terminates TLS on `:7443` directly (agent control protocol cannot be proxied as HTTP).
+- `hopd` terminates TLS on `:7443` directly (the agent control protocol speaks hop's protocol and cannot be proxied as HTTP).
 - Run `hopd` with:
   ```sh
   hopd -domain hop.yourdomain.com -ingress 172.17.0.1:8080 -ingress-tls=false -scheme https -control :7443

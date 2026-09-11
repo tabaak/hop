@@ -515,3 +515,9 @@ Run the complete test suite with race detection:
 ```sh
 go test -race ./...
 ```
+
+---
+
+## 📄 License
+
+Hop is open-source software licensed under the [MIT License](LICENSE).

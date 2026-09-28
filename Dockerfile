@@ -1,5 +1,8 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH
 
 WORKDIR /src
 
@@ -11,7 +14,7 @@ RUN go mod download
 
 # Copy source code and build statically linked binary
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w -X main.version=v1.0.0" -o /hopd ./cmd/hopd
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags "-s -w -X main.version=v1.0.0" -o /hopd ./cmd/hopd
 
 # Final runtime image
 FROM alpine:3.20

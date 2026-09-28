@@ -39,7 +39,7 @@ If you are deploying Hop from scratch, **you must set up `hopd` first** before t
 - 🔑 **TLS Certificates**:
   - *Default & automated:* A **Cloudflare API Token** (with `Zone:DNS:Edit` and `Zone:Zone:Read` permissions) to automatically issue Let's Encrypt wildcard certificates via DNS-01.
   - *Or custom:* Your own wildcard certificate files (`fullchain.pem` and `privkey.pem`) from Certbot or your DNS provider.
-- 🚪 **Firewall Ports Open**: Ports `80` (HTTP redirect), `443` (HTTPS ingress), and `7443` (agent control connection).
+- 🚪 **Firewall Ports Open**: Ports `80` (HTTP redirect), `443` (HTTPS ingress), and `7443` (agent control connection) — *(or just `7443` if running behind an existing reverse proxy)*.
 - 🐳 **Docker & Docker Compose** on your VPS (recommended, or Go 1.22+ for bare metal).
 - ➡️ Start with **[Part 1: Server Setup (`hopd`)](#-part-1-server-setup-hopd)**.
 
@@ -116,14 +116,15 @@ The fastest and cleanest way to run `hopd` in production.
 
 #### 1. Set up the project on your VPS
 ```sh
-# Clone the repository (shallow clone):
-git clone --depth 1 https://github.com/tabaak/hop.git
-cd hop
+# Option 1: Download Compose files directly (no git or source code needed):
+mkdir -p hop && cd hop
+curl -sO https://raw.githubusercontent.com/tabaak/hop/main/docker-compose.yml
+curl -sO https://raw.githubusercontent.com/tabaak/hop/main/.env.example
 cp .env.example .env
 
-# Or without git (download project archive):
-mkdir -p hop && cd hop
-curl -sL https://github.com/tabaak/hop/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1
+# Option 2: Or clone the repository:
+git clone --depth 1 https://github.com/tabaak/hop.git
+cd hop
 cp .env.example .env
 ```
 
@@ -239,7 +240,7 @@ sudo systemctl enable hopd
 
 ### 🌐 What If Your DNS Is Not on Cloudflare?
 
-You have three straightforward alternatives:
+You have two straightforward alternatives:
 
 1. **Point Your Nameservers to Cloudflare (Free):** You do not need to move your domain registration or pay anything. In your domain registrar (Namecheap, GoDaddy, Porkbun, etc.), keep your registrar and simply set the domain's NS (nameserver) records to Cloudflare's free DNS.
 2. **Bring Your Own Wildcard Certificate (`-tls-cert` & `-tls-key`):** If your DNS is on AWS Route 53, DigitalOcean, Porkbun, DuckDNS, etc., generate a wildcard cert with Certbot or acme.sh:
@@ -253,7 +254,72 @@ You have three straightforward alternatives:
         -tls-key /etc/letsencrypt/live/hop.yourdomain.com/privkey.pem
    ```
    *(Or in Docker via `HOP_TLS_CERT` and `HOP_TLS_KEY`).* `hopd` will load your cert directly and skip ACME.
-3. **Run Behind an Existing Reverse Proxy (Caddy / Nginx / Traefik):** If your server already runs a reverse proxy that owns `:80` and `:443`, have it terminate wildcard TLS and proxy HTTP ingress to `hopd` on an internal port (`127.0.0.1:8080`), while `hopd` terminates TLS on `:7443` directly. See [`deploy/README.md`](deploy/README.md#4b-behind-an-existing-caddy).
+
+---
+
+### 🔀 Running Alongside Existing Websites (Nginx / Caddy / Reverse Proxy)
+
+If your VPS already runs other websites and owns ports `:80` and `:443`, **do not let `hopd` bind them**. Instead, let your existing web server terminate wildcard TLS and reverse-proxy tunnel traffic to `hopd` on an internal port:
+
+```
+[ Internet ] ── HTTPS (:443) ──> [ Your Nginx / Caddy ] ──> 127.0.0.1:8080 ──> [ hopd ]
+[ Internet ] ── TLS (:7443)   ─────────────────────────────────────────────> [ hopd ]
+```
+
+#### 1. Configure `hopd` for Reverse Proxy Mode
+
+In `.env`:
+```env
+DOMAIN=hop.yourdomain.com
+HOP_INGRESS=:8080
+HOP_REDIRECT=
+HOP_INGRESS_TLS=false
+HOP_SCHEME=https
+```
+
+In `docker-compose.yml`, change the port mappings so `hopd` binds `127.0.0.1:8080` instead of public `:80` and `:443`:
+```yaml
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "7443:7443"
+```
+*(If running bare-metal Systemd, pass flags: `-ingress=:8080 -redirect="" -ingress-tls=false -scheme=https`).*
+
+#### 2. Configure Your Existing Web Server
+
+##### Nginx
+Add a server block to your Nginx configuration (e.g. `/etc/nginx/sites-available/hop`):
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name *.hop.yourdomain.com;
+
+    ssl_certificate /path/to/wildcard/fullchain.pem;
+    ssl_certificate_key /path/to/wildcard/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+##### Caddy
+Add this block to your `Caddyfile`:
+```caddyfile
+*.hop.yourdomain.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+> [!NOTE]
+> Port `:7443` connects directly to `hopd` from your laptop and bypasses Nginx/Caddy because it is a raw TCP/yamux TLS control connection, not HTTP.
 
 ---
 

@@ -1,9 +1,10 @@
 services:
   hopd:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: hopd:latest
+    image: ghcr.io/tabaak/hopd:latest
+    # To build from local source instead, uncomment below:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     container_name: hopd
     restart: unless-stopped
     ports:
@@ -18,6 +19,10 @@ services:
       - HOP_TOKENS=${HOP_TOKENS:-}
       - HOP_TLS_CERT=${HOP_TLS_CERT:-}
       - HOP_TLS_KEY=${HOP_TLS_KEY:-}
+      - HOP_INGRESS=${HOP_INGRESS:-:443}
+      - HOP_REDIRECT=${HOP_REDIRECT:-:80}
+      - HOP_INGRESS_TLS=${HOP_INGRESS_TLS:-true}
+      - HOP_SCHEME=${HOP_SCHEME:-}
     volumes:
       - hopd-certs:/var/lib/hop/certs
       - hopd-tokens:/etc/hop

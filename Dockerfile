@@ -1,12 +1,12 @@
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH
 
 WORKDIR /src
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata git
 
 # Cache dependencies
 COPY go.mod go.sum ./

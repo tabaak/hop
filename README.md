@@ -137,12 +137,20 @@ EMAIL=you@example.com
 STAGING=true
 ```
 
+> [!IMPORTANT]
+> **Already hosting a website on this VPS (ports 80 or 443 in use)?**
+> If you already have Nginx, Caddy, Apache, or another container running on ports 80 or 443, **you must add this line to `.env`**:
+> ```env
+> COMPOSE_PROFILES=proxy
+> ```
+> This tells Docker Compose to run in **Proxy mode** on internal port `127.0.0.1:8080` without touching ports 80 or 443, avoiding port collision errors. Then, forward `*.hop.yourdomain.com` from your existing web server to `127.0.0.1:8080` (see **[Running Alongside Existing Websites](#-running-alongside-existing-websites-nginx--caddy--reverse-proxy)** for ready-to-copy Nginx and Caddy blocks).
+
 #### 3. Start the Container
 ```sh
 docker compose up -d
 docker compose logs -f
 ```
-Look for `obtaining certificate ...` and `certificate ready` in the logs.
+Look for `certificate ready` (in standalone mode) or `ingress listening on :8080` (in proxy mode) in the logs.
 
 #### 4. Mint Your First Agent Token
 Mint an agent token inside the container and append its hash to the tokens volume:

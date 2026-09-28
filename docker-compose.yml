@@ -34,7 +34,7 @@ services:
     <<: *hopd-common
     profiles: ["proxy"]
     ports:
-      - "127.0.0.1:8080:8080"
+      - "8080:8080"
       - "7443:7443"
     environment:
       - DOMAIN=${DOMAIN:-hop.example.com}

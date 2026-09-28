@@ -64,8 +64,22 @@ func main() {
 		certDir      = flag.String("cert-dir", envOr("HOP_CERT_DIR", "/var/lib/hop/certs"), "directory for the ACME account key and certificates")
 		tlsCert      = flag.String("tls-cert", envOr("HOP_TLS_CERT", ""), "path to custom TLS certificate fullchain.pem (skips ACME/Cloudflare)")
 		tlsKey       = flag.String("tls-key", envOr("HOP_TLS_KEY", ""), "path to custom TLS private key.pem")
+		reverseProxy = flag.Bool("reverse-proxy", envBool("HOP_REVERSE_PROXY", envBool("REVERSE_PROXY", false)), "running behind a reverse proxy; sets ingress-tls=false, redirect=\"\", scheme=https, ingress=:8080")
 	)
 	flag.Parse()
+
+	if *reverseProxy {
+		if *redirectAddr == ":80" {
+			*redirectAddr = ""
+		}
+		if *ingressAddr == ":443" {
+			*ingressAddr = ":8080"
+		}
+		*ingressTLS = false
+		if *scheme == "" {
+			*scheme = "https"
+		}
+	}
 
 	store, err := tokens.Open(*tokensFile, envTokens(*tokensFlag))
 	if err != nil {

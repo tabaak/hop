@@ -1,15 +1,40 @@
+x-hopd-common: &hopd-common
+  image: ghcr.io/tabaak/hopd:latest
+  # To build from local source instead, uncomment below:
+  # build:
+  #   context: .
+  #   dockerfile: Dockerfile
+  container_name: hopd
+  restart: unless-stopped
+  environment:
+    - DOMAIN=${DOMAIN:-hop.example.com}
+    - EMAIL=${EMAIL:-}
+    - STAGING=${STAGING:-true}
+    - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
+    - HOP_TOKENS=${HOP_TOKENS:-}
+    - HOP_TLS_CERT=${HOP_TLS_CERT:-}
+    - HOP_TLS_KEY=${HOP_TLS_KEY:-}
+    - REVERSE_PROXY=${REVERSE_PROXY:-false}
+  volumes:
+    - hopd-certs:/var/lib/hop/certs
+    - hopd-tokens:/etc/hop
+
 services:
+  # Standalone mode (default): Claims public ports 80 and 443
   hopd:
-    image: ghcr.io/tabaak/hopd:latest
-    # To build from local source instead, uncomment below:
-    # build:
-    #   context: .
-    #   dockerfile: Dockerfile
-    container_name: hopd
-    restart: unless-stopped
+    <<: *hopd-common
+    profiles: ["standalone"]
     ports:
       - "80:80"
       - "443:443"
+      - "7443:7443"
+
+  # Reverse Proxy mode: Runs on 127.0.0.1:8080 behind existing Nginx / Caddy
+  hopd-proxy:
+    <<: *hopd-common
+    profiles: ["proxy"]
+    ports:
+      - "127.0.0.1:8080:8080"
       - "7443:7443"
     environment:
       - DOMAIN=${DOMAIN:-hop.example.com}
@@ -19,13 +44,7 @@ services:
       - HOP_TOKENS=${HOP_TOKENS:-}
       - HOP_TLS_CERT=${HOP_TLS_CERT:-}
       - HOP_TLS_KEY=${HOP_TLS_KEY:-}
-      - HOP_INGRESS=${HOP_INGRESS:-:443}
-      - HOP_REDIRECT=${HOP_REDIRECT:-:80}
-      - HOP_INGRESS_TLS=${HOP_INGRESS_TLS:-true}
-      - HOP_SCHEME=${HOP_SCHEME:-}
-    volumes:
-      - hopd-certs:/var/lib/hop/certs
-      - hopd-tokens:/etc/hop
+      - REVERSE_PROXY=true
 
 volumes:
   hopd-certs:

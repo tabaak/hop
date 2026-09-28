@@ -266,24 +266,15 @@ If your VPS already runs other websites and owns ports `:80` and `:443`, **do no
 [ Internet ] ── TLS (:7443)   ─────────────────────────────────────────────> [ hopd ]
 ```
 
-#### 1. Configure `hopd` for Reverse Proxy Mode
+#### 1. Enable Proxy Mode in `.env`
 
-In `.env`:
+In `.env`, simply set:
 ```env
-DOMAIN=hop.yourdomain.com
-HOP_INGRESS=:8080
-HOP_REDIRECT=
-HOP_INGRESS_TLS=false
-HOP_SCHEME=https
+COMPOSE_PROFILES=proxy
 ```
+That's it! Docker Compose automatically frees ports `:80` and `:443`, binds internal port `127.0.0.1:8080`, and configures `hopd` for reverse proxy operation. You never need to touch `docker-compose.yml`.
 
-In `docker-compose.yml`, change the port mappings so `hopd` binds `127.0.0.1:8080` instead of public `:80` and `:443`:
-```yaml
-    ports:
-      - "127.0.0.1:8080:8080"
-      - "7443:7443"
-```
-*(If running bare-metal Systemd, pass flags: `-ingress=:8080 -redirect="" -ingress-tls=false -scheme=https`).*
+*(If running bare-metal Systemd without Docker, just pass the flag: `-reverse-proxy`).*
 
 #### 2. Configure Your Existing Web Server
 

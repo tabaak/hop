@@ -94,16 +94,19 @@ Wildcard certificates (`*.hop.yourdomain.com`) **cannot** be issued via standard
 
 ### 3. Open Firewall Ports
 
-Ensure your VPS firewall allows traffic on ports `80`, `443`, and `7443`:
+Traffic on ports `80` (HTTP redirect), `443` (HTTPS ingress), and `7443` (tunnel control) must reach your VPS:
 
-```sh
-sudo ufw allow 22/tcp     # Don't lock yourself out!
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow 7443/tcp
-sudo ufw enable
-```
-*(On AWS, Oracle Cloud, or Hetzner, also ensure ingress rules for 80, 443, and 7443 are allowed in your cloud provider's Security List / Security Group).*
+- **Cloud Provider Firewalls (AWS, Hetzner, DigitalOcean, Oracle Cloud, etc.):**
+  Make sure your cloud provider's **Security Group / Firewall** allows inbound TCP on ports `80`, `443`, and `7443`.
+- **Host Firewall (UFW):**
+  - If you deploy via **Docker**, Docker manages its own iptables rules and forwards these ports automatically.
+  - If you deploy via **Bare Metal (Systemd)** or already have UFW active on the host, allow the ports:
+    ```sh
+    sudo ufw allow 80/tcp
+    sudo ufw allow 443/tcp
+    sudo ufw allow 7443/tcp
+    ```
+    *(If UFW is inactive, you don't need to enable it unless you want a host-level firewall. If enabling it, always ensure your SSH port—default `22/tcp`—is allowed first!)*
 
 ---
 
@@ -113,15 +116,14 @@ The fastest and cleanest way to run `hopd` in production.
 
 #### 1. Set up the project on your VPS
 ```sh
-# Clone the repository:
-git clone https://github.com/tabaak/hop.git
+# Clone the repository (shallow clone):
+git clone --depth 1 https://github.com/tabaak/hop.git
 cd hop
 cp .env.example .env
 
-# Or without git (download files directly):
+# Or without git (download project archive):
 mkdir -p hop && cd hop
-curl -sO https://raw.githubusercontent.com/tabaak/hop/main/docker-compose.yml
-curl -sO https://raw.githubusercontent.com/tabaak/hop/main/.env.example
+curl -sL https://github.com/tabaak/hop/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1
 cp .env.example .env
 ```
 

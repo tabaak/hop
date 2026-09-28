@@ -145,27 +145,26 @@ STAGING=true
 > ```
 > This tells Docker Compose to run in **Proxy mode** on internal port `127.0.0.1:8080` without touching ports 80 or 443, avoiding port collision errors. Then, forward `*.hop.yourdomain.com` from your existing web server to `127.0.0.1:8080` (see **[Running Alongside Existing Websites](#-running-alongside-existing-websites-nginx--caddy--reverse-proxy)** for ready-to-copy Nginx and Caddy blocks).
 
-#### 3. Start the Container
+#### 3. Mint Your First Agent Token
+Mint an initial device token into the tokens volume before starting the daemon:
 ```sh
-docker compose up -d
-docker compose logs -f
-```
-Look for `certificate ready` (in standalone mode) or `ingress listening on :8080` (in proxy mode) in the logs.
-
-#### 4. Mint Your First Agent Token
-Mint an agent token inside the container and append its hash to the tokens volume:
-```sh
-docker compose exec hopd hopd mint laptop -a /etc/hop/tokens
+docker compose run --rm hopd mint laptop -a /etc/hop/tokens
 ```
 This prints the secret token for your laptop:
 ```
 Token for "laptop". Copy it now — it is not stored anywhere and cannot be shown again:
 
   399c2d76589419d2...
-
-Appended to /etc/hop/tokens. hopd picks it up within seconds, no restart!
 ```
 Save this token! You will use it on your laptop in Part 2.
+*(To mint more tokens later while hopd is running, use `docker compose exec hopd hopd mint <name> -a /etc/hop/tokens`).*
+
+#### 4. Start the Container
+```sh
+docker compose up -d
+docker compose logs -f
+```
+You will see `1 token(s) accepted`, followed by `certificate ready` (in standalone mode) or `ingress listening on :8080` (in proxy mode).
 
 #### 5. Switch to Production Certificates
 Once the staging test succeeds, edit `.env` to set `STAGING=false`, clear the staging certs, and recreate the container:

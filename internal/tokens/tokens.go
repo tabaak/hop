@@ -81,10 +81,15 @@ type Store struct {
 	stamp stamp
 }
 
-// stamp is what we compare to decide the file changed. Modification time plus
-// size catches every realistic edit — an in-place write, a truncate, or the
-// atomic rename an editor does — without hashing the file on every poll.
+// stamp is what we compare to decide the file changed, without hashing the file
+// on every poll. Modification time plus size catches an in-place write or a
+// truncate. The file's identity catches the atomic rename editors and config
+// management do, which modification time alone can miss: Linux stamps files
+// from a clock that only moves every few milliseconds, and a replacement token
+// line is exactly as long as the one it replaces, so a quick swap can leave
+// both unchanged.
 type stamp struct {
+	file os.FileInfo
 	mod  time.Time
 	size int64
 }
@@ -172,7 +177,7 @@ func (s *Store) Reload() (int, error) {
 	s.mu.Lock()
 	// Record what we looked at even when it failed to parse, so a broken file
 	// is complained about once per edit rather than once per poll.
-	s.stamp = stamp{fi.ModTime(), fi.Size()}
+	s.stamp = stamp{fi, fi.ModTime(), fi.Size()}
 	if parseErr == nil && len(parsed) > 0 {
 		s.file = parsed
 	}
@@ -238,7 +243,7 @@ func (s *Store) changed() bool {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return !fi.ModTime().Equal(s.stamp.mod) || fi.Size() != s.stamp.size
+	return !os.SameFile(fi, s.stamp.file) || !fi.ModTime().Equal(s.stamp.mod) || fi.Size() != s.stamp.size
 }
 
 func parseFile(path string) (map[string]string, error) {

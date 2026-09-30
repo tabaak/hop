@@ -11,3 +11,5 @@ SKILL.md
 
 #Mac
 .DS_Store
+# Editor swap files
+*.swp

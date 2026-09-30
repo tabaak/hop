@@ -3,6 +3,9 @@ FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH
+# The release this image reports to agents. docker.yml passes the tag; a local
+# build is "dev", which agents never compare against their own release.
+ARG VERSION=dev
 
 WORKDIR /src
 
@@ -14,7 +17,7 @@ RUN go mod download
 
 # Copy source code and build statically linked binary
 COPY . .
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags "-s -w -X main.version=v1.0.0" -o /hopd ./cmd/hopd
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags "-s -w -X main.version=${VERSION}" -o /hopd ./cmd/hopd
 
 # Final runtime image
 FROM alpine:3.20

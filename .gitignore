@@ -1,6 +1,7 @@
 # Built binaries
 /hop
 /hopd
+/dist
 
 # Local Claude Code settings (machine-specific paths)
 .claude

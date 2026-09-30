@@ -1,0 +1,77 @@
+# Builds the release binaries and publishes them to a GitHub Release.
+# Run by .github/workflows/release.yml on every v* tag. Try it locally with:
+#
+#   goreleaser release --snapshot --clean
+#
+# The hopd container image is built separately, by docker.yml.
+version: 2
+
+project_name: hop
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: hop
+    main: ./cmd/hop
+    binary: hop
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}
+
+  # The server only runs on Linux VPSes, so there is no macOS build of it.
+  - id: hopd
+    main: ./cmd/hopd
+    binary: hopd
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}
+
+# One archive per binary per platform. The names carry no version, so
+# https://github.com/tabaak/hop/releases/latest/download/hop_darwin_arm64.tar.gz
+# always points at the newest release — install.sh and the README rely on that.
+archives:
+  - id: hop
+    ids: [hop]
+    formats: [tar.gz]
+    name_template: "hop_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+  - id: hopd
+    ids: [hopd]
+    formats: [tar.gz]
+    name_template: "hopd_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - deploy/hopd.service
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs"
+      - "^chore"
+      - "^test"
+
+release:
+  github:
+    owner: tabaak
+    name: hop
+  footer: |
+    **Server:** `docker pull ghcr.io/tabaak/hopd:{{ .Version }}`, or the `hopd_linux_*` archives above.

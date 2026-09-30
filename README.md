@@ -40,7 +40,8 @@ If you are deploying Hop from scratch, **you must set up `hopd` first** before t
   - *Default & automated:* A **Cloudflare API Token** (with `Zone:DNS:Edit` and `Zone:Zone:Read` permissions) to automatically issue Let's Encrypt wildcard certificates via DNS-01.
   - *Or custom:* Your own wildcard certificate files (`fullchain.pem` and `privkey.pem`) from Certbot or your DNS provider.
 - 🚪 **Firewall Ports Open**: Ports `80` (HTTP redirect), `443` (HTTPS ingress), and `7443` (agent control connection) — *(or just `7443` if running behind an existing reverse proxy)*.
-- 🐳 **Docker & Docker Compose** on your VPS (recommended, or Go 1.22+ for bare metal).
+- 🐳 **Docker & Docker Compose** on your VPS (recommended, or Go 1.26+ for bare metal).
+- 🧰 **Go 1.26+** on your laptop to build the `hop` client (see [Installation](#-installation)).
 - ➡️ Start with **[Part 1: Server Setup (`hopd`)](#-part-1-server-setup-hopd)**.
 
 #### Scenario C: Local offline testing
@@ -157,7 +158,7 @@ Token for "laptop". Copy it now — it is not stored anywhere and cannot be show
   399c2d76589419d2...
 ```
 Save this token! You will use it on your laptop in Part 2.
-*(To mint more tokens later while hopd is running, use `docker compose exec hopd hopd mint <name> -a /etc/hop/tokens`).*
+*(To mint more tokens later while hopd is running, use `docker exec hopd hopd mint <name> -a /etc/hop/tokens` — this works in both standalone and proxy mode. The running daemon picks up the new token within seconds, no restart needed).*
 
 #### 4. Start the Container
 ```sh
@@ -170,14 +171,23 @@ You will see `1 token(s) accepted`, followed by `certificate ready` (in standalo
 Once the staging test succeeds, edit `.env` to set `STAGING=false`, clear the staging certs, and recreate the container:
 ```sh
 docker compose down
-docker compose run --rm --entrypoint rm hopd -rf /var/lib/hop/certs/*
+docker compose run --rm --entrypoint sh hopd -c 'rm -rf /var/lib/hop/certs/*'
 docker compose up -d
 ```
+*(The single quotes matter: the `*` must be expanded by the shell inside the container, not by your VPS shell.)*
 
 Verify reachability from your laptop:
 ```sh
+# Standalone mode:
 curl -I https://hop.yourdomain.com
 # HTTP/2 404 (Healthy response — TLS terminated correctly!)
+
+# Proxy mode (your web server only routes the wildcard, so test a subdomain):
+curl https://test.hop.yourdomain.com
+# hop: No agent is serving "test" right now.
+
+# Both modes — the agent control port must be reachable:
+nc -zv hop.yourdomain.com 7443
 ```
 
 ---
@@ -217,22 +227,29 @@ sudo chmod 600 /etc/hop/hopd.env
 #### 3. Mint Device Tokens
 ```sh
 # On the VPS:
-hopd mint laptop -a /etc/hop/tokens
+sudo hopd mint laptop -a /etc/hop/tokens
+sudo chown root:hop /etc/hop/tokens
+sudo chmod 640 /etc/hop/tokens
 ```
-Save the secret token output for your laptop.
+Save the secret token output for your laptop. The service runs as the `hop` user, so without the `chown`/`chmod` it cannot read the tokens file and exits with `no tokens configured`.
 
 #### 4. Install Systemd Service (Staging Test First!)
 Copy the systemd unit from [`deploy/hopd.service`](deploy/hopd.service):
 ```sh
 sudo cp deploy/hopd.service /etc/systemd/system/hopd.service
 ```
-Edit `/etc/systemd/system/hopd.service` with your domain and email, then:
+Edit the `ExecStart` line in `/etc/systemd/system/hopd.service`:
+- Replace `-domain hop.vokh.dev` and `-email ...` with your own domain and email.
+- The unit ships configured for running **behind a reverse proxy** (Caddy in Docker): `-ingress 172.17.0.1:8080 -ingress-tls=false -scheme https`. `172.17.0.1` is the Docker bridge address (check with `ip -4 addr show docker0`); use `127.0.0.1:8080` if your proxy runs directly on the host. Then configure your proxy as in [Running Alongside Existing Websites](#-running-alongside-existing-websites-nginx--caddy--reverse-proxy).
+- **Standalone instead** (hopd owns `:80`/`:443`): replace those three flags with `-ingress :443`, and replace `CapabilityBoundingSet=` with the two `CAP_NET_BIND_SERVICE` lines described in the unit's comments — the `hop` user cannot bind ports below 1024 otherwise.
+
+Then:
 ```sh
 sudo systemctl daemon-reload
 sudo systemctl start hopd
 sudo journalctl -u hopd -f
 ```
-Confirm `certificate ready` appears in the logs.
+Confirm `certificate ready` appears in the logs (followed by `ingress listening on ...`).
 
 #### 5. Switch to Production Certificates
 Edit `/etc/systemd/system/hopd.service` to set `-staging=false`, then restart:
@@ -287,7 +304,7 @@ That's it! Docker Compose automatically frees ports `:80` and `:443`, publishes 
 > [!TIP]
 > **Symptom of a port clash:** if you forget `COMPOSE_PROFILES=proxy` while another container owns `:80`/`:443`, `docker compose up -d` may still report `Started`, but `docker compose ps` shows no published ports and the logs show DNS errors like `lookup acme-v02.api.letsencrypt.org on 127.0.0.53:53: ... connection refused` — the container came up without a network. Set the profile, then `docker compose down && docker compose up -d`.
 
-*(If running bare-metal Systemd without Docker, just pass the flag: `-reverse-proxy`).*
+*(If running bare-metal Systemd without Docker, pass `-reverse-proxy` — it listens on `:8080` on all interfaces, so either firewall it or set `-ingress 127.0.0.1:8080` explicitly.)*
 
 #### 2. Configure Your Existing Web Server
 
@@ -356,23 +373,8 @@ Once your `hopd` server is running (or your team administrator has given you you
 
 ### 📦 Installation
 
-#### Homebrew (macOS / Linux)
-```sh
-brew install tabaak/tap/hop
-```
+There are no prebuilt packages yet (no Homebrew tap, and `go install` by module path does not resolve), so build the client from source. You need **Go 1.26+** (`go version`; any Go ≥ 1.21 will download the required toolchain automatically).
 
-*(Or tap the repository manually):*
-```sh
-brew tap tabaak/hop
-brew install hop
-```
-
-#### Go Install
-```sh
-go install hop.vokh.dev/cmd/hop@latest
-```
-
-#### From Source
 ```sh
 git clone https://github.com/tabaak/hop.git
 cd hop

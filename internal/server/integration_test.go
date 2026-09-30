@@ -34,6 +34,9 @@ const testToken = "test-token"
 // refusal rather than a takeover.
 const otherToken = "other-token"
 
+// testRelease is the release the harness's server reports.
+const testRelease = "v9.9.0"
+
 // TestTunnelEndToEnd_Plaintext is the M1 development path: no TLS anywhere.
 func TestTunnelEndToEnd_Plaintext(t *testing.T) {
 	h := newHarness(t, false)
@@ -251,7 +254,7 @@ func TestUnknownSubdomainIs404(t *testing.T) {
 func TestListReportsLiveTunnels(t *testing.T) {
 	h := newHarness(t, false)
 
-	got, err := client.List(h.agent)
+	got, _, err := client.List(h.agent)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -284,7 +287,7 @@ func TestListDoesNotClaimAName(t *testing.T) {
 	h := newHarness(t, false)
 
 	for i := 0; i < 3; i++ {
-		got, err := client.List(h.agent)
+		got, _, err := client.List(h.agent)
 		if err != nil {
 			t.Fatalf("List %d: %v", i, err)
 		}
@@ -301,7 +304,7 @@ func TestListRequiresAValidToken(t *testing.T) {
 
 	cfg := h.agent
 	cfg.Token = "not-the-token"
-	_, err := client.List(cfg)
+	_, _, err := client.List(cfg)
 	if !errors.Is(err, client.ErrRefused) {
 		t.Fatalf("err = %v, want ErrRefused", err)
 	}
@@ -429,6 +432,7 @@ func newHarnessOpts(t *testing.T, opts harnessOpts) *harness {
 	srv := server.New(server.Config{
 		Domain:       "localhost",
 		PublicScheme: opts.scheme,
+		Release:      testRelease,
 		Tokens: tokens.New(map[string]string{
 			tokens.Hash(testToken):  "test-agent",
 			tokens.Hash(otherToken): "other-agent",
@@ -837,7 +841,7 @@ func (h *harness) waitForListingWithout(t *testing.T, sub string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		live, err := client.List(h.agent)
+		live, _, err := client.List(h.agent)
 		if err == nil {
 			found := false
 			for _, tn := range live {

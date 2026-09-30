@@ -7,11 +7,64 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 )
 
 // Version is the protocol version an agent announces in Hello.
+//
+// It is not the release version, and the two move at very different speeds. A
+// release changes with every tag; this changes only when an old agent and a new
+// server (or the reverse) could no longer understand each other. Everything
+// added so far — optional fields, the Bye stream — was added so that it didn't
+// have to, and the next feature should try just as hard. A bump means every
+// installed hop on the far side of it stops working until it is upgraded.
 const Version = "1"
+
+// MinVersion is the oldest agent protocol this build still accepts. Raise it
+// only together with Version, and only when the old protocol can't be served.
+const MinVersion = "1"
+
+// legacyVersion is what a peer that predates version reporting speaks. Servers
+// before v1.1.0 said nothing about their protocol, and every one of them spoke
+// this.
+const legacyVersion = "1"
+
+// Supported reports whether a server built from this package can talk to an
+// agent announcing protocol v, and if not, whether the agent is the side that
+// is out of date. An empty version is read as the legacy protocol, so a hand-
+// written agent that leaves the field out is judged on what it most likely is.
+func Supported(v string) (ok, agentTooOld bool) {
+	n, err := strconv.Atoi(orLegacy(v))
+	if err != nil {
+		// Not a number at all: nothing to be judged older or newer. Telling
+		// the agent to upgrade is the likelier fix.
+		return false, true
+	}
+	lo, _ := strconv.Atoi(MinVersion)
+	hi, _ := strconv.Atoi(Version)
+	return n >= lo && n <= hi, n < lo
+}
+
+// ServerProtocol is the protocol a server speaks, given what its HelloAck or
+// Listing reported. A server that reported nothing predates version reporting
+// and so speaks the legacy protocol.
+func ServerProtocol(reported string) string { return orLegacy(reported) }
+
+// SpeaksWith reports whether an agent built from this package can talk to a
+// server that reported protocol reported in its HelloAck. A server that
+// reports one has already accepted the agent's, so only a silent, pre-v1.1.0
+// server is in question: it speaks the legacy protocol and nothing else.
+func SpeaksWith(reported string) bool {
+	return reported != "" || Version == legacyVersion
+}
+
+func orLegacy(v string) string {
+	if v == "" {
+		return legacyVersion
+	}
+	return v
+}
 
 // What an agent is dialling in to do. A connection does one or the other and
 // the choice is made in the first frame, so the server knows before it touches
@@ -42,6 +95,10 @@ type Hello struct {
 	// stores it, echoes it back in a listing, and never acts on it.
 	Local   string `json:"local,omitempty"`
 	Version string `json:"version"`
+	// Release is the agent's release version, e.g. "v1.1.0". Logged by the
+	// server so an operator can see which devices are running what; nothing
+	// decides anything on it. Empty from an agent older than v1.1.0.
+	Release string `json:"release,omitempty"`
 }
 
 // Why a tunnel was refused, in a form the agent can branch on. Err carries the
@@ -58,7 +115,26 @@ const (
 	CodeBadName = "bad-name"
 	// CodeBadToken — the token isn't one this server accepts.
 	CodeBadToken = "bad-token"
+	// CodeVersion — the agent's protocol is one this server can't speak. Err
+	// says which side needs upgrading. An agent from before this code existed
+	// treats it like any refusal it doesn't recognise, which is to print Err
+	// and stop, so the sentence has to stand on its own.
+	CodeVersion = "version"
 )
+
+// ServerInfo is what a server says about itself once it has accepted a token.
+// It rides on HelloAck and Listing rather than a message of its own, so no
+// extra round trip is spent on it and servers that predate it simply leave it
+// out.
+//
+// It is withheld from a refused token: which release a server runs is worth
+// something to someone looking for a known bug, and nothing to them otherwise.
+type ServerInfo struct {
+	// Release is the server's release version, e.g. "v1.1.0".
+	Release string `json:"server_release,omitempty"`
+	// Protocol is the newest protocol the server speaks.
+	Protocol string `json:"server_protocol,omitempty"`
+}
 
 // HelloAck is the server's reply to OpTunnel. Err is set iff the tunnel was
 // refused.
@@ -71,6 +147,7 @@ type HelloAck struct {
 	// refusal was treated before this field existed — so an old server costs
 	// an agent its reconnect, never a wrong decision.
 	Code string `json:"code,omitempty"`
+	ServerInfo
 }
 
 // Bye is the agent saying a stop was deliberate — Ctrl-C, or `hop stop` —
@@ -99,6 +176,8 @@ type Listing struct {
 	// HelloAck. Without the check that lands as an empty list, which reads as
 	// "nothing is running" rather than "ask a newer server".
 	URL string `json:"url,omitempty"`
+
+	ServerInfo
 }
 
 // TunnelInfo is one live tunnel.

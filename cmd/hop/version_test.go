@@ -46,11 +46,14 @@ func captureOutput(f func()) string {
 }
 
 func TestRunVersion(t *testing.T) {
+	// With a token in the environment the command would also dial the server.
+	t.Setenv("HOP_TOKEN", "")
+
 	out := captureOutput(func() {
 		runVersion(nil)
 	})
-	if out != "hop v1.0.0" {
-		t.Errorf("runVersion(nil) = %q, want %q", out, "hop v1.0.0")
+	if out != "hop v1.0.0 (protocol 1)" {
+		t.Errorf("runVersion(nil) = %q, want %q", out, "hop v1.0.0 (protocol 1)")
 	}
 
 	outShort := captureOutput(func() {

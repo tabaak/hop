@@ -33,3 +33,38 @@ func TestCleanLocal(t *testing.T) {
 		}
 	}
 }
+
+func TestSupported(t *testing.T) {
+	cases := []struct {
+		v                  string
+		wantOK, wantTooOld bool
+	}{
+		{Version, true, false},
+		{MinVersion, true, false},
+		// Read as the legacy protocol rather than rejected.
+		{"", true, false},
+		{"0", false, true},
+		{"99", false, false},
+		{"one", false, true},
+	}
+	for _, c := range cases {
+		ok, tooOld := Supported(c.v)
+		if ok != c.wantOK || tooOld != c.wantTooOld {
+			t.Errorf("Supported(%q) = %v, %v; want %v, %v", c.v, ok, tooOld, c.wantOK, c.wantTooOld)
+		}
+	}
+}
+
+// A server that reports its protocol has already judged the agent's; a silent
+// one is pre-v1.1.0 and speaks only the legacy protocol.
+func TestSpeaksWith(t *testing.T) {
+	if !SpeaksWith(Version) {
+		t.Errorf("SpeaksWith(%q) = false for a server that accepted us", Version)
+	}
+	if got, want := SpeaksWith(""), Version == legacyVersion; got != want {
+		t.Errorf("SpeaksWith(\"\") = %v, want %v", got, want)
+	}
+	if got := ServerProtocol(""); got != legacyVersion {
+		t.Errorf("ServerProtocol(\"\") = %q, want %q", got, legacyVersion)
+	}
+}

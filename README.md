@@ -481,8 +481,17 @@ sudo install -m 755 hop /usr/local/bin/hop
 Verify your installation:
 ```sh
 hop version
-# hop v1.0.0
+# hop v1.1.0 (protocol 1)
+# hopd v1.1.0 (protocol 1) at hop.yourdomain.com:7443   ← only when HOP_TOKEN is set
 ```
+
+#### Client and server versions
+
+`hop` and `hopd` are released together under one version number, but you don't have to upgrade them together:
+
+- **Any `hop` works with any `hopd` that speaks the same protocol.** The protocol number (shown by `hop version` and `hopd version`) changes only when a change could no longer work with older binaries, which is rare. New features are added so that older binaries simply ignore them.
+- **A newer `hop` against an older `hopd` still connects.** Features that need server support won't work until the server is upgraded, and `hop` prints a one-line note saying so.
+- **If the protocols don't match**, the connection is refused with a message saying which side to upgrade.
 
 ---
 
@@ -651,6 +660,7 @@ curl -H "Host: myapp.localhost" http://127.0.0.1:8080/
 - **One agent per subdomain:** Tunnels are scoped to token labels. If a connection drops, a new agent under the *same token label* reclaims the name immediately. An agent with a *different* token label is refused.
 - **45-Second Grace Hold:** If an agent temporarily drops connection, the server preserves its subdomain for 45 seconds. Requests arriving in the interim receive **HTTP 503 `Retry-After: 5`** instead of 404, preventing webhook providers from dropping or deactivating endpoints.
 - **Instant Intentional Teardown:** Explicit exits (`Ctrl-C` or `hop stop`) send a protocol `Bye` frame, releasing subdomains immediately so they can be reused without waiting out the grace window.
+- **Versions are checked at the handshake:** The agent announces its protocol and release; `hopd` refuses protocols it can't speak with a message naming the side to upgrade, reports its own release and protocol to authenticated agents (never to a rejected token), and logs which `hop` release each device runs.
 - **Full Jitter Exponential Backoff:** Reconnects draw random waits from an exponential window (1s to 30s) to prevent thundering herd storms when a server reboots.
 - **Private Peer Plaintext Guard:** `--no-tls` strictly blocks connections unless the peer is a loopback or private network address (RFC 1918, CGNAT `100.64.0.0/10`, IPv6 ULA) to prevent transmitting tokens in plaintext over the internet.
 - **Local Inspector Security:** The inspector binds exclusively to `127.0.0.1` and drops any request whose `Host` is not a loopback address, protecting against DNS rebinding attacks.

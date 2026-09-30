@@ -31,10 +31,11 @@ func runPS(args []string) {
 		os.Exit(2)
 	}
 
-	tunnels, err := client.List(client.Config{
-		Server: *serverAddr,
-		Token:  *token,
-		TLS:    !*noTLS,
+	tunnels, _, err := client.List(client.Config{
+		Server:  *serverAddr,
+		Token:   *token,
+		TLS:     !*noTLS,
+		Release: currentVersion(),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hop: %v\n", err)

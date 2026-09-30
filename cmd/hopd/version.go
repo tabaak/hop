@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"runtime/debug"
+
+	"hop.vokh.dev/internal/proto"
 )
 
 // Version information.
@@ -17,7 +19,7 @@ var (
 )
 
 func runVersion() {
-	fmt.Printf("hopd %s\n", currentVersion())
+	fmt.Printf("hopd %s (protocol %s)\n", currentVersion(), proto.Version)
 }
 
 func currentVersion() string {

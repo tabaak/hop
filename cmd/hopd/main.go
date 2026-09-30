@@ -122,6 +122,7 @@ func main() {
 		PublicScheme: *scheme,
 		PublicPort:   *publicPort,
 		Tokens:       store,
+		Release:      currentVersion(),
 	})
 
 	// A nil stop channel never fires, so the watcher lives as long as the

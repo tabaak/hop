@@ -49,7 +49,7 @@ func TestRunVersion(t *testing.T) {
 	out := captureOutput(func() {
 		runVersion()
 	})
-	if out != "hopd v1.0.0" {
-		t.Errorf("runVersion() = %q, want %q", out, "hopd v1.0.0")
+	if out != "hopd v1.0.0 (protocol 1)" {
+		t.Errorf("runVersion() = %q, want %q", out, "hopd v1.0.0 (protocol 1)")
 	}
 }

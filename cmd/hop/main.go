@@ -17,6 +17,7 @@ import (
 
 	"hop.vokh.dev/internal/client"
 	"hop.vokh.dev/internal/inspect"
+	"hop.vokh.dev/internal/proto"
 )
 
 func main() {
@@ -102,6 +103,19 @@ func runHTTP(args []string) {
 		Token:      *token,
 		TLS:        !*noTLS,
 		HostHeader: resolveHostHeader(*hostHeader, local),
+		Release:    currentVersion(),
+	}
+	// Said once rather than on every reconnect: the server's release doesn't
+	// change while a tunnel bounces, and the line would bury the request log.
+	warned := false
+	cfg.OnServer = func(info proto.ServerInfo) {
+		if warned {
+			return
+		}
+		warned = true
+		if note := serverBehind(info, cfg.Release); note != "" {
+			fmt.Fprintf(os.Stderr, "hop: note: %s\n", note)
+		}
 	}
 	if !*quiet {
 		initColour(*noColour)
@@ -293,7 +307,7 @@ usage:
   hop stop --all            stop all of them
   hop log <tunnel> [-f]     show a detached tunnel's output (also: logs)
   hop inspect <tunnel>      serve the request inspector for a running tunnel
-  hop version               print the version of hop (also: --version, -v)
+  hop version               print the version of hop, and of the server when a token is set (also: --version, -v)
 
   <tunnel> is its subdomain, its agent's pid, or the local port it serves.
 

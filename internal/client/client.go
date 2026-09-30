@@ -54,6 +54,13 @@ type Config struct {
 	// Farewell, if set, lets a signal handler end the tunnel deliberately. Run
 	// keeps it pointed at whichever session is live.
 	Farewell *Farewell
+	// Release is this agent's release version, sent so the server's log can
+	// say which hop each device runs. Empty sends nothing.
+	Release string
+	// OnServer, if set, is told what the server reported about itself after
+	// each successful handshake — empty fields from a server older than
+	// v1.1.0. Called from Run's goroutine, before OnUp.
+	OnServer func(proto.ServerInfo)
 }
 
 // Farewell ends a tunnel on purpose.
@@ -228,6 +235,9 @@ func Run(cfg Config) (Result, error) {
 		return res, err
 	}
 	res.Subdomain = ack.Subdomain
+	if cfg.OnServer != nil {
+		cfg.OnServer(ack.ServerInfo)
+	}
 
 	// The agent takes the yamux server role: the hop server is the side that
 	// opens a stream per inbound request.
@@ -306,6 +316,7 @@ func handshake(conn net.Conn, cfg Config) (proto.HelloAck, error) {
 		Subdomain: cfg.Subdomain,
 		Local:     cfg.Local,
 		Version:   proto.Version,
+		Release:   cfg.Release,
 	}
 	if err := proto.Write(conn, hello); err != nil {
 		return ack, fmt.Errorf("send hello: %w", err)
@@ -315,6 +326,16 @@ func handshake(conn net.Conn, cfg Config) (proto.HelloAck, error) {
 	}
 	if ack.Err != "" {
 		return ack, &Refusal{Code: ack.Code, Reason: ack.Err}
+	}
+	// A server that reports its protocol has already checked ours. One that
+	// doesn't predates the check, and would accept an agent it can't serve and
+	// then fail in ways nobody could read — so the agent does the check itself.
+	if !proto.SpeaksWith(ack.Protocol) {
+		return ack, &Refusal{
+			Code: proto.CodeVersion,
+			Reason: fmt.Sprintf("the server is too old for this hop (it speaks protocol %s, this hop speaks %s); ask whoever runs hopd to upgrade it, or use an older hop",
+				proto.ServerProtocol(ack.Protocol), proto.Version),
+		}
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		return ack, err

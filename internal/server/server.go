@@ -48,6 +48,9 @@ type Config struct {
 	PublicPort string
 	// Tokens authenticates agents.
 	Tokens Authenticator
+	// Release is hopd's release version, reported to authenticated agents so
+	// they can tell their user when the server is behind them.
+	Release string
 }
 
 // Authenticator resolves an agent's token to the label that owns it. The label
@@ -161,7 +164,7 @@ func (s *Server) handleAgent(conn net.Conn) {
 	sub, gen := c.sub, c.gen
 	// The label makes the log answer "which of my devices is this?", which is
 	// the whole reason tokens are issued per device.
-	who := fmt.Sprintf("%s (%s)", remote, c.label)
+	who := fmt.Sprintf("%s (%s, hop %s)", remote, c.label, releaseOrUnknown(h.Release))
 
 	// From here the claim is ours; every exit path must dispose of it.
 	//
@@ -238,7 +241,42 @@ func (s *Server) hello(conn net.Conn) (h proto.Hello, label string, ok bool) {
 		proto.Write(conn, proto.HelloAck{Err: "invalid token", Code: proto.CodeBadToken})
 		return h, "", false
 	}
+	// Checked after the token, so only someone entitled to use the server
+	// learns which release it runs.
+	if ok, agentTooOld := proto.Supported(h.Version); !ok {
+		log.Printf("agent %s (%s): unsupported protocol %q (hop %s)", conn.RemoteAddr(), label, h.Version, releaseOrUnknown(h.Release))
+		proto.Write(conn, proto.HelloAck{
+			Err:        versionRefusal(h.Version, agentTooOld),
+			Code:       proto.CodeVersion,
+			ServerInfo: s.info(),
+		})
+		return h, "", false
+	}
 	return h, label, true
+}
+
+// versionRefusal is the sentence an agent prints before it exits, so it names
+// the side that has to change and what to do about it. Agents older than
+// CodeVersion print it verbatim, with nothing of their own around it.
+func versionRefusal(agent string, agentTooOld bool) string {
+	if agentTooOld {
+		return fmt.Sprintf("this hop is too old for the server (protocol %s, server needs %s–%s); upgrade hop and try again",
+			agent, proto.MinVersion, proto.Version)
+	}
+	return fmt.Sprintf("the server is too old for this hop (protocol %s, server speaks up to %s); ask whoever runs hopd to upgrade it, or use an older hop",
+		agent, proto.Version)
+}
+
+// info is what an authenticated agent is told about this server.
+func (s *Server) info() proto.ServerInfo {
+	return proto.ServerInfo{Release: s.cfg.Release, Protocol: proto.Version}
+}
+
+func releaseOrUnknown(r string) string {
+	if r == "" {
+		return "older than v1.1.0"
+	}
+	return r
 }
 
 // serveList answers `hop ps` and hangs up. No yamux upgrade, no claim, nothing
@@ -261,7 +299,7 @@ func (s *Server) serveList(conn net.Conn, remote net.Addr, label string) {
 			UptimeSeconds: int64(time.Since(l.Since).Seconds()),
 		})
 	}
-	if err := proto.Write(conn, proto.Listing{Tunnels: out}); err != nil {
+	if err := proto.Write(conn, proto.Listing{Tunnels: out, ServerInfo: s.info()}); err != nil {
 		return
 	}
 	log.Printf("agent %s (%s): listed %d tunnel(s)", remote, label, len(out))
@@ -280,7 +318,7 @@ func (s *Server) claim(conn net.Conn, h proto.Hello, label string) (c claim, ok 
 		return claim{}, false
 	}
 
-	ack := proto.HelloAck{Subdomain: sub, URL: s.urlFor(sub)}
+	ack := proto.HelloAck{Subdomain: sub, URL: s.urlFor(sub), ServerInfo: s.info()}
 	if err := proto.Write(conn, ack); err != nil {
 		s.reg.Release(sub, gen)
 		return claim{}, false

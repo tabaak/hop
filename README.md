@@ -143,7 +143,7 @@ STAGING=true
 > ```env
 > COMPOSE_PROFILES=proxy
 > ```
-> This tells Docker Compose to run in **Proxy mode** on internal port `127.0.0.1:8080` without touching ports 80 or 443, avoiding port collision errors. Then, forward `*.hop.yourdomain.com` from your existing web server to `127.0.0.1:8080` (see **[Running Alongside Existing Websites](#-running-alongside-existing-websites-nginx--caddy--reverse-proxy)** for ready-to-copy Nginx and Caddy blocks).
+> This tells Docker Compose to run in **Proxy mode** on plain-HTTP port `8080` without touching ports 80 or 443, avoiding port collision errors. Then, forward `*.hop.yourdomain.com` from your existing web server to port `8080` (see **[Running Alongside Existing Websites](#-running-alongside-existing-websites-nginx--caddy--reverse-proxy)** for ready-to-copy Nginx and Caddy blocks).
 
 #### 3. Mint Your First Agent Token
 Mint an initial device token into the tokens volume before starting the daemon:
@@ -269,8 +269,8 @@ You have two straightforward alternatives:
 If your VPS already runs other websites and owns ports `:80` and `:443`, **do not let `hopd` bind them**. Instead, let your existing web server terminate wildcard TLS and reverse-proxy tunnel traffic to `hopd` on an internal port:
 
 ```
-[ Internet ] ── HTTPS (:443) ──> [ Your Nginx / Caddy ] ──> 127.0.0.1:8080 ──> [ hopd ]
-[ Internet ] ── TLS (:7443)   ─────────────────────────────────────────────> [ hopd ]
+[ Internet ] ── HTTPS (:443) ──> [ Your Nginx / Caddy ] ──> :8080 (HTTP) ──> [ hopd ]
+[ Internet ] ── TLS (:7443)   ───────────────────────────────────────────> [ hopd ]
 ```
 
 #### 1. Enable Proxy Mode in `.env`
@@ -279,7 +279,13 @@ In `.env`, simply set:
 ```env
 COMPOSE_PROFILES=proxy
 ```
-That's it! Docker Compose automatically frees ports `:80` and `:443`, binds internal port `127.0.0.1:8080`, and configures `hopd` for reverse proxy operation. You never need to touch `docker-compose.yml`.
+That's it! Docker Compose automatically frees ports `:80` and `:443`, publishes plain-HTTP port `:8080`, and configures `hopd` for reverse proxy operation. You never need to touch `docker-compose.yml`.
+
+> [!WARNING]
+> Port `8080` is published on all interfaces so that a reverse proxy running in its own container can reach it. **Keep `8080` closed in your cloud firewall / security list** — only `7443` (and your proxy's `80`/`443`) should be reachable from the internet.
+
+> [!TIP]
+> **Symptom of a port clash:** if you forget `COMPOSE_PROFILES=proxy` while another container owns `:80`/`:443`, `docker compose up -d` may still report `Started`, but `docker compose ps` shows no published ports and the logs show DNS errors like `lookup acme-v02.api.letsencrypt.org on 127.0.0.53:53: ... connection refused` — the container came up without a network. Set the profile, then `docker compose down && docker compose up -d`.
 
 *(If running bare-metal Systemd without Docker, just pass the flag: `-reverse-proxy`).*
 
@@ -309,15 +315,38 @@ server {
 ```
 
 ##### Caddy
-Add this block to your `Caddyfile`:
+A wildcard certificate can only be issued via the **DNS-01** challenge, and the stock `caddy` binary/image ships without DNS provider plugins. Build Caddy with your DNS provider first, e.g. for Cloudflare:
+```dockerfile
+FROM caddy:2-builder-alpine AS builder
+RUN xcaddy build --with github.com/caddy-dns/cloudflare
+
+FROM caddy:2-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+```
+
+Then add this block to your `Caddyfile`:
 ```caddyfile
 *.hop.yourdomain.com {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    # Caddy on the host:
     reverse_proxy 127.0.0.1:8080
+    # Caddy in Docker: use host.docker.internal:8080 instead (see below)
 }
 ```
 
+If Caddy itself runs in a container, `127.0.0.1` is the Caddy container, not the host. Map the host gateway in Caddy's compose service and proxy to `host.docker.internal:8080`:
+```yaml
+  caddy:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      CF_API_TOKEN: ${CF_API_TOKEN}
+```
+
 > [!NOTE]
-> Port `:7443` connects directly to `hopd` from your laptop and bypasses Nginx/Caddy because it is a raw TCP/yamux TLS control connection, not HTTP.
+> Port `:7443` connects directly to `hopd` from your laptop and bypasses Nginx/Caddy because it is a raw TCP/yamux TLS control connection, not HTTP. `hopd` still obtains its own certificate for `hop.yourdomain.com` to secure this connection, so remember to set `STAGING=false` in proxy mode too — agents will not trust a staging certificate.
 
 ---
 

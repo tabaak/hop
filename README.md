@@ -306,33 +306,48 @@ That's it! Docker Compose automatically frees ports `:80` and `:443`, publishes 
 
 *(If running bare-metal Systemd without Docker, pass `-reverse-proxy` — it listens on `:8080` on all interfaces, so either firewall it or set `-ingress 127.0.0.1:8080` explicitly.)*
 
-#### 2. Configure Your Existing Web Server
+#### 2. Find the Address Your Web Server Should Forward To
 
-##### Nginx
-Add a server block to your Nginx configuration (e.g. `/etc/nginx/sites-available/hop`):
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name *.hop.yourdomain.com;
+This depends on **where your web server runs**, not on hop:
 
-    ssl_certificate /path/to/wildcard/fullchain.pem;
-    ssl_certificate_key /path/to/wildcard/privkey.pem;
+| Your Nginx / Caddy runs… | Forward to | Notes |
+|---|---|---|
+| Directly on the host (apt, systemd) | `127.0.0.1:8080` | Simplest case. |
+| In Docker — **config file only** | `<gateway-ip>:8080` | No change to the proxy's `docker-compose.yml`. See below to find the IP. |
+| In Docker — with `host.docker.internal` | `host.docker.internal:8080` | Same on every machine, but on Linux you must add one line to the proxy's compose service (see below). |
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
+> [!IMPORTANT]
+> If your web server runs in Docker, **`127.0.0.1` is the web server's own container, not the host** — forwarding there gives `502 Bad Gateway`.
+
+**Finding `<gateway-ip>`** (web server in Docker, config-file-only): the host is reachable at the gateway of the Docker network your web server container is on. Print it with (replace `caddy-container` with your container's name from `docker ps`):
+```sh
+docker inspect caddy-container \
+  --format '{{range $net, $cfg := .NetworkSettings.Networks}}{{$net}} {{$cfg.Gateway}}{{"\n"}}{{end}}'
+# myproject_default 172.18.0.1   ← use 172.18.0.1:8080
+```
+This IP stays the same while that Docker network exists. If you ever `docker compose down` the web server's project and tunnels start returning `502`, re-run the command and update the address.
+
+**Using `host.docker.internal` instead:** add this to your web server's service in *its* `docker-compose.yml`, then recreate it with `docker compose up -d <service>` (a restart or reload does not apply compose changes):
+```yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 ```
 
+#### 3. Configure Your Web Server
+
+In the examples below, replace:
+- `hop.yourdomain.com` → your `DOMAIN` from `.env` (e.g. `hop.example.com`, so the site name becomes `*.hop.example.com`)
+- `<address>` → the address from step 2 (e.g. `127.0.0.1:8080` or `172.18.0.1:8080`)
+
 ##### Caddy
-A wildcard certificate can only be issued via the **DNS-01** challenge, and the stock `caddy` binary/image ships without DNS provider plugins. Build Caddy with your DNS provider first, e.g. for Cloudflare:
+
+**a) Check that your Caddy can issue a wildcard certificate.** A wildcard certificate can only be issued via the **DNS-01** challenge, and the stock `caddy` binary/image ships **without** DNS provider plugins. Check:
+```sh
+caddy list-modules | grep dns.providers
+# Caddy in Docker:
+docker compose exec caddy caddy list-modules | grep dns.providers
+```
+If `dns.providers.cloudflare` is listed, skip to b). Otherwise build Caddy with the plugin, e.g. with this `Dockerfile` next to your Caddy compose file:
 ```dockerfile
 FROM caddy:2-builder-alpine AS builder
 RUN xcaddy build --with github.com/caddy-dns/cloudflare
@@ -340,27 +355,96 @@ RUN xcaddy build --with github.com/caddy-dns/cloudflare
 FROM caddy:2-alpine
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 ```
+Point your Caddy service at it (`build: .` instead of `image: caddy:2-alpine`), pass the Cloudflare token as an environment variable (`CF_API_TOKEN: ${CF_API_TOKEN}` under `environment:`), and run `docker compose up -d --build caddy`. For a non-Docker Caddy, download a build that includes `caddy-dns/cloudflare` from [caddyserver.com/download](https://caddyserver.com/download). Other DNS providers have their own `caddy-dns/<provider>` plugin.
 
-Then add this block to your `Caddyfile`:
+**b) Add the site block** to your `Caddyfile` (Caddyfiles use tabs for indentation):
 ```caddyfile
 *.hop.yourdomain.com {
-    tls {
-        dns cloudflare {env.CF_API_TOKEN}
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+	reverse_proxy <address>
+}
+```
+Deliberately no `encode` directive: compressing tunnel traffic would break streaming responses (SSE, chunked) passing through.
+
+**c) Reload Caddy** — applies the Caddyfile with no downtime; if the file has an error, Caddy keeps the old config and prints why:
+```sh
+caddy reload --config /etc/caddy/Caddyfile
+# Caddy in Docker:
+docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+```
+Watch the logs for `certificate obtained successfully` for `*.hop.yourdomain.com` (10–30 seconds on first run).
+
+##### Nginx
+
+**a) Get a wildcard certificate.** Nginx does not issue certificates itself; use Certbot with the DNS plugin for your provider, e.g. Cloudflare:
+```sh
+sudo apt install certbot python3-certbot-dns-cloudflare
+sudo install -m 600 /dev/null /etc/letsencrypt/cloudflare.ini
+echo "dns_cloudflare_api_token = <your-cloudflare-api-token>" | sudo tee /etc/letsencrypt/cloudflare.ini >/dev/null
+sudo certbot certonly --dns-cloudflare \
+  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+  -d "*.hop.yourdomain.com" \
+  --deploy-hook "systemctl reload nginx"
+```
+Certbot renews automatically; the deploy hook reloads Nginx after each renewal so it picks up the new certificate. (Nginx in Docker: mount `/etc/letsencrypt` into the container and use `docker exec <nginx-container> nginx -s reload` as the hook.)
+
+**b) Add a server block** (e.g. `/etc/nginx/sites-available/hop`, then `sudo ln -s /etc/nginx/sites-available/hop /etc/nginx/sites-enabled/`):
+```nginx
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;   # Nginx older than 1.25.1: remove this line and use "listen 443 ssl http2;"
+    server_name *.hop.yourdomain.com;
+
+    ssl_certificate     /etc/letsencrypt/live/hop.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/hop.yourdomain.com/privkey.pem;
+
+    # Tunnels carry arbitrary apps and webhooks: no upload limit, and pass
+    # streaming responses (SSE, chunked) through instead of buffering them.
+    client_max_body_size 0;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
+
+    location / {
+        proxy_pass http://<address>;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
-    # Caddy on the host:
-    reverse_proxy 127.0.0.1:8080
-    # Caddy in Docker: use host.docker.internal:8080 instead (see below)
 }
 ```
 
-If Caddy itself runs in a container, `127.0.0.1` is the Caddy container, not the host. Map the host gateway in Caddy's compose service and proxy to `host.docker.internal:8080`:
-```yaml
-  caddy:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      CF_API_TOKEN: ${CF_API_TOKEN}
+**c) Test and reload:**
+```sh
+sudo nginx -t && sudo systemctl reload nginx
+# Nginx in Docker:
+docker exec <nginx-container> nginx -t && docker exec <nginx-container> nginx -s reload
 ```
+
+#### 4. Verify
+
+From your laptop, with no agent connected yet:
+```sh
+curl https://test.hop.yourdomain.com
+# hop: No agent is serving "test" right now.   ← web server → hopd path works
+```
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `curl: (35) ... tlsv1 alert internal error` / `SSL_ERROR_INTERNAL_ERROR_ALERT` | Web server has no certificate for this name | Site name still `yourdomain.com`, config not reloaded, or the certificate request failed — check the web server's logs |
+| `502 Bad Gateway` | Web server can't reach hopd | Wrong address in step 2 (usually `127.0.0.1` from inside Docker), or hopd isn't running (`docker compose ps` in the hop directory) |
+| Caddy log: `module not registered: dns.providers.cloudflare` | Stock Caddy without the DNS plugin | Step 3 Caddy a) |
+| Caddy/Certbot: `API token ... invalid` or `403` | Token wrong or lacking `Zone:DNS:Edit` for your zone | Recreate the token as in [DNS-01 Credentials](#2-dns-01-credentials-or-custom-certificates) |
+| Caddy: `Caddyfile input is not formatted` warning | Spaces instead of tabs | Harmless; re-indent with tabs to silence it |
+| Response comes from your main website, not hop | DNS for `*.hop` missing, or another site block matches first | Check `dig +short test.hop.yourdomain.com` and your other server blocks |
 
 > [!NOTE]
 > Port `:7443` connects directly to `hopd` from your laptop and bypasses Nginx/Caddy because it is a raw TCP/yamux TLS control connection, not HTTP. `hopd` still obtains its own certificate for `hop.yourdomain.com` to secure this connection, so remember to set `STAGING=false` in proxy mode too — agents will not trust a staging certificate.

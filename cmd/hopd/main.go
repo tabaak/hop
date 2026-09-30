@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"hop.vokh.dev/internal/certs"
+	"hop.vokh.dev/internal/dnsprovider"
 	"hop.vokh.dev/internal/server"
 	"hop.vokh.dev/internal/tokens"
 )
@@ -62,9 +63,13 @@ func main() {
 		email        = flag.String("email", envOr("HOP_EMAIL", envOr("EMAIL", "")), "ACME account email for expiry notices")
 		staging      = flag.Bool("staging", envBool("HOP_STAGING", envBool("STAGING", true)), "use the Let's Encrypt staging CA; set false for real certificates")
 		certDir      = flag.String("cert-dir", envOr("HOP_CERT_DIR", "/var/lib/hop/certs"), "directory for the ACME account key and certificates")
-		tlsCert      = flag.String("tls-cert", envOr("HOP_TLS_CERT", ""), "path to custom TLS certificate fullchain.pem (skips ACME/Cloudflare)")
+		tlsCert      = flag.String("tls-cert", envOr("HOP_TLS_CERT", ""), "path to custom TLS certificate fullchain.pem (skips ACME)")
 		tlsKey       = flag.String("tls-key", envOr("HOP_TLS_KEY", ""), "path to custom TLS private key.pem")
 		reverseProxy = flag.Bool("reverse-proxy", envBool("HOP_REVERSE_PROXY", envBool("REVERSE_PROXY", false)), "running behind a reverse proxy; sets ingress-tls=false, redirect=\"\", scheme=https, ingress=:8080")
+		dnsProvider  = flag.String("dns-provider", envOr("DNS_PROVIDER", dnsprovider.Detect(os.Getenv)), "DNS host for certificates and records: "+strings.Join(dnsprovider.Names(), ", "))
+		dnsCheck     = flag.Bool("dns-check", envBool("HOP_DNS_CHECK", true), "wait until the domain and its wildcard resolve before starting")
+		manageDNS    = flag.Bool("manage-dns", envBool("HOP_MANAGE_DNS", true), "create missing A records through the DNS provider")
+		publicIP     = flag.String("public-ip", envOr("HOP_PUBLIC_IP", ""), "address the DNS records should point at (default: detected)")
 	)
 	flag.Parse()
 
@@ -89,6 +94,21 @@ func main() {
 		log.Fatal("no tokens configured: pass -tokens-file or -tokens, or set HOP_TOKENS")
 	}
 	log.Printf("%d token(s) accepted", store.Len())
+
+	provider, err := dnsprovider.New(*dnsProvider, os.Getenv)
+	if err != nil {
+		log.Fatalf("dns: %v", err)
+	}
+	custom := *tlsCert != "" || *tlsKey != ""
+	if provider == nil && !custom && (*ingressTLS || *controlTLS) {
+		log.Fatalf("certificates: no DNS provider configured. Set DNS_PROVIDER and its credentials:\n\n%s\nor pass -tls-cert and -tls-key to use your own certificate.", dnsprovider.Help())
+	}
+
+	// Plaintext on both listeners is local development, where there are no
+	// public records to wait for.
+	if *dnsCheck && (*ingressTLS || *controlTLS) && !skipDNSCheck(*domain) {
+		prepareDNS(*domain, *publicIP, *dnsProvider, provider, *manageDNS)
+	}
 
 	if *scheme == "" {
 		*scheme = "http"
@@ -116,7 +136,7 @@ func main() {
 	// obtaining if we serve tunnel traffic ourselves; behind a proxy the proxy
 	// holds it and we need just the bare name for the control listener.
 	var tlsCfg *tls.Config
-	if *tlsCert != "" || *tlsKey != "" {
+	if custom {
 		if *tlsCert == "" || *tlsKey == "" {
 			log.Fatal("certificates: both -tls-cert and -tls-key must be provided")
 		}
@@ -140,14 +160,13 @@ func main() {
 		}
 		log.Printf("obtaining certificate for %s ...", names)
 
-		var err error
 		tlsCfg, err = certs.TLSConfig(context.Background(), certs.Config{
-			Domain:          *domain,
-			Email:           *email,
-			CloudflareToken: os.Getenv("CLOUDFLARE_API_TOKEN"),
-			StorageDir:      *certDir,
-			Staging:         *staging,
-			Wildcard:        *ingressTLS,
+			Domain:      *domain,
+			Email:       *email,
+			DNSProvider: provider,
+			StorageDir:  *certDir,
+			Staging:     *staging,
+			Wildcard:    *ingressTLS,
 		})
 		if err != nil {
 			log.Fatalf("certificates: %v", err)

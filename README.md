@@ -35,10 +35,9 @@ If an administrator has already deployed `hopd`:
 #### Scenario B: You are self-hosting your own Hop server
 If you are deploying Hop from scratch, **you must set up `hopd` first** before the client can connect. You will need:
 - 🖥️ **A Linux VPS** with a public IPv4/IPv6 address (Hetzner, DigitalOcean, AWS, Oracle Cloud, etc.).
-- 🌐 **A Domain Name** where you can add DNS records (e.g. `hop.yourdomain.com` and `*.hop.yourdomain.com`).
-- 🔑 **TLS Certificates**:
-  - *Default & automated:* A **Cloudflare API Token** (with `Zone:DNS:Edit` and `Zone:Zone:Read` permissions) to automatically issue Let's Encrypt wildcard certificates via DNS-01.
-  - *Or custom:* Your own wildcard certificate files (`fullchain.pem` and `privkey.pem`) from Certbot or your DNS provider.
+- 🌐 **A Domain Name** (hop will live under a subdomain such as `hop.yourdomain.com`).
+- 🔑 **DNS provider API credentials** so hopd can issue its Let's Encrypt wildcard certificate and create its DNS records itself. Supported: Cloudflare, Route 53, DigitalOcean, Hetzner, Porkbun, Namecheap, GoDaddy, Gandi, OVH, Linode, Vultr, DuckDNS, deSEC, Bunny.
+  - *Provider not listed?* Bring your own wildcard certificate (`fullchain.pem` + `privkey.pem`) and create two DNS records by hand — hopd tells you exactly which.
 - 🚪 **Firewall Ports Open**: Ports `80` (HTTP redirect), `443` (HTTPS ingress), and `7443` (agent control connection) — *(or just `7443` if running behind an existing reverse proxy)*.
 - 🐳 **Docker & Docker Compose** on your VPS (recommended, or Go 1.26+ for bare metal).
 - 🧰 **Go 1.26+** on your laptop to build the `hop` client (see [Installation](#-installation)).
@@ -66,32 +65,33 @@ If you just want to test Hop on your laptop without a VPS, domain, or TLS certif
 
 Follow this section to deploy the `hopd` daemon on your VPS. Once deployed, you will generate an agent token to use on your laptop.
 
-### 1. DNS Configuration
+### 1. DNS Provider Credentials
 
-In your DNS provider, create two **A** records pointing to your VPS IP address:
+hopd uses your DNS provider's API for two things: issuing the wildcard certificate (`*.hop.yourdomain.com` can only be validated via ACME **DNS-01**), and creating the `hop` and `*.hop` A records on first start. **You do not need to create any DNS records yourself.**
 
-| Type | Name | Content | Proxy Status |
-|------|------|---------|--------------|
-| A | `hop` | `<VPS_IP>` | **DNS only (Grey Cloud)** |
-| A | `*.hop` | `<VPS_IP>` | **DNS only (Grey Cloud)** |
+Create an API credential for your provider:
 
-> [!IMPORTANT]
-> If using Cloudflare DNS, the orange proxy cloud **must be OFF (Grey Cloud / DNS-only)**. Cloudflare's proxy terminates TLS, which prevents hopd from solving the ACME challenge and breaks the raw TCP control connection on port 7443.
+| Provider | `DNS_PROVIDER` | Variables | Where to get it |
+|---|---|---|---|
+| Cloudflare | `cloudflare` | `CLOUDFLARE_API_TOKEN` | My Profile → API Tokens → Create Token → Custom: `Zone`→`DNS`→`Edit` **and** `Zone`→`Zone`→`Read`, scoped to your zone |
+| AWS Route 53 | `route53` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (or an instance role) | IAM user with `route53:ChangeResourceRecordSets`, `ListHostedZonesByName`, `ListResourceRecordSets`, `GetChange` |
+| DigitalOcean | `digitalocean` | `DIGITALOCEAN_TOKEN` | API → Tokens, with write scope |
+| Hetzner | `hetzner` | `HETZNER_API_TOKEN` | dns.hetzner.com → API Tokens |
+| Porkbun | `porkbun` | `PORKBUN_API_KEY`, `PORKBUN_SECRET_API_KEY` | Account → API Access, then enable API access on the domain |
+| Namecheap | `namecheap` | `NAMECHEAP_API_KEY`, `NAMECHEAP_API_USER` | Profile → Tools → API Access; allowlist your VPS IP |
+| GoDaddy | `godaddy` | `GODADDY_TOKEN` (`key:secret`) | developer.godaddy.com → API Keys (Production) |
+| Gandi | `gandi` | `GANDI_BEARER_TOKEN` | Account → Authentication → Personal Access Token |
+| OVH | `ovh` | `OVH_ENDPOINT`, `OVH_APPLICATION_KEY`, `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY` | api.ovh.com/createToken |
+| Linode · Vultr · DuckDNS · deSEC · Bunny | `linode` · `vultr` · `duckdns` · `desec` · `bunny` | `LINODE_TOKEN` · `VULTR_API_KEY` · `DUCKDNS_TOKEN` · `DESEC_TOKEN` · `BUNNY_API_KEY` | Provider's API settings |
 
-Verify DNS propagation before continuing:
-```sh
-dig +short hop.yourdomain.com
-dig +short anything.hop.yourdomain.com
-```
+Provider not listed? See [Unsupported DNS Providers](#-unsupported-dns-providers).
 
-### 2. DNS-01 Credentials or Custom Certificates
+> [!NOTE]
+> On every start, hopd checks that `hop.yourdomain.com` and `*.hop.yourdomain.com` resolve. Missing records are created through the provider (never overwritten if they already exist); without provider access, hopd prints the exact records to add and **waits until they resolve** — no `dig` needed. It also warns if a record points somewhere else, or at Cloudflare's proxy (the orange cloud must be **off** — agents cannot connect through it).
 
-Wildcard certificates (`*.hop.yourdomain.com`) **cannot** be issued via standard HTTP-01 challenges; they require ACME **DNS-01**.
+### 2. Pick Your Subdomain
 
-- **Option 1 (Cloudflare DNS - Automated):** In Cloudflare Dashboard → **My Profile** → **API Tokens** → **Create Token** → **Custom Token**:
-  - Permissions: `Zone` → `DNS` → `Edit` **and** `Zone` → `Zone` → `Read`.
-  - Zone Resources: `Include` → `Specific zone` → `<yourdomain.com>`.
-- **Option 2 (Non-Cloudflare / Custom Certs):** If your DNS is on Route53, Porkbun, DuckDNS, etc., generate a wildcard cert with Certbot/acme.sh and pass `-tls-cert` and `-tls-key`. See [Non-Cloudflare DNS Guide](#-what-if-your-dns-is-not-on-cloudflare).
+Everything lives under one subdomain, e.g. `hop.yourdomain.com`: tunnels become `<name>.hop.yourdomain.com`, and agents connect to `hop.yourdomain.com:7443`. It must be in a zone your credential can edit.
 
 ### 3. Open Firewall Ports
 
@@ -130,13 +130,15 @@ cp .env.example .env
 ```
 
 #### 2. Configure `.env`
-Edit `.env` with your domain and Cloudflare token:
+Edit `.env` with your domain and DNS provider credentials:
 ```env
 DOMAIN=hop.yourdomain.com
+DNS_PROVIDER=cloudflare
 CLOUDFLARE_API_TOKEN=your-cloudflare-api-token
 EMAIL=you@example.com
 STAGING=true
 ```
+For another provider, set `DNS_PROVIDER` and its variables from the [table above](#1-dns-provider-credentials) instead — `.env.example` lists them all.
 
 > [!IMPORTANT]
 > **Already hosting a website on this VPS (ports 80 or 443 in use)?**
@@ -165,7 +167,7 @@ Save this token! You will use it on your laptop in Part 2.
 docker compose up -d
 docker compose logs -f
 ```
-You will see `1 token(s) accepted`, followed by `certificate ready` (in standalone mode) or `ingress listening on :8080` (in proxy mode).
+You will see `1 token(s) accepted`, then `dns: creating hop.yourdomain.com, *.hop.yourdomain.com → <VPS_IP>` on the first start, `dns: ... resolve`, and finally `certificate ready` (in standalone mode) or `ingress listening on :8080` (in proxy mode).
 
 #### 5. Switch to Production Certificates
 Once the staging test succeeds, edit `.env` to set `STAGING=false`, clear the staging certs, and recreate the container:
@@ -219,6 +221,7 @@ sudo chown hop:hop /var/lib/hop/certs
 sudo chmod 700 /var/lib/hop/certs
 
 sudo bash -c 'cat > /etc/hop/hopd.env <<EOF
+DNS_PROVIDER=cloudflare
 CLOUDFLARE_API_TOKEN=<your-scoped-cloudflare-token>
 EOF'
 sudo chmod 600 /etc/hop/hopd.env
@@ -262,14 +265,14 @@ sudo systemctl enable hopd
 
 ---
 
-### 🌐 What If Your DNS Is Not on Cloudflare?
+### 🌐 Unsupported DNS Providers
 
-You have two straightforward alternatives:
+If your DNS host has no API or isn't in the [supported list](#1-dns-provider-credentials), you have two options:
 
-1. **Point Your Nameservers to Cloudflare (Free):** You do not need to move your domain registration or pay anything. In your domain registrar (Namecheap, GoDaddy, Porkbun, etc.), keep your registrar and simply set the domain's NS (nameserver) records to Cloudflare's free DNS.
-2. **Bring Your Own Wildcard Certificate (`-tls-cert` & `-tls-key`):** If your DNS is on AWS Route 53, DigitalOcean, Porkbun, DuckDNS, etc., generate a wildcard cert with Certbot or acme.sh:
+1. **Move just the DNS to a supported provider (free):** Keep your registrar and point the domain's nameservers at Cloudflare, deSEC or Hetzner DNS, all of which are free.
+2. **Bring your own wildcard certificate and create the records by hand:** Generate a wildcard cert with Certbot or acme.sh:
    ```sh
-   certbot certonly --dns-route53 -d "hop.yourdomain.com" -d "*.hop.yourdomain.com"
+   certbot certonly --manual --preferred-challenges dns -d "hop.yourdomain.com" -d "*.hop.yourdomain.com"
    ```
    Supply the cert files directly to `hopd`:
    ```sh
@@ -277,7 +280,16 @@ You have two straightforward alternatives:
         -tls-cert /etc/letsencrypt/live/hop.yourdomain.com/fullchain.pem \
         -tls-key /etc/letsencrypt/live/hop.yourdomain.com/privkey.pem
    ```
-   *(Or in Docker via `HOP_TLS_CERT` and `HOP_TLS_KEY`).* `hopd` will load your cert directly and skip ACME.
+   *(Or in Docker via `HOP_TLS_CERT` and `HOP_TLS_KEY`.)* On start, hopd prints the two A records to create and waits until they resolve:
+   ```
+   DNS is not set up yet. Create these records at your DNS provider:
+
+     ✗  A    hop.yourdomain.com    203.0.113.7
+     ✗  A    *.hop.yourdomain.com  203.0.113.7
+
+   Waiting for them to resolve — hopd continues on its own once they do.
+   ```
+   Manual certificates don't renew themselves: renew before expiry and restart hopd.
 
 ---
 
@@ -442,7 +454,7 @@ curl https://test.hop.yourdomain.com
 | `curl: (35) ... tlsv1 alert internal error` / `SSL_ERROR_INTERNAL_ERROR_ALERT` | Web server has no certificate for this name | Site name still `yourdomain.com`, config not reloaded, or the certificate request failed — check the web server's logs |
 | `502 Bad Gateway` | Web server can't reach hopd | Wrong address in step 2 (usually `127.0.0.1` from inside Docker), or hopd isn't running (`docker compose ps` in the hop directory) |
 | Caddy log: `module not registered: dns.providers.cloudflare` | Stock Caddy without the DNS plugin | Step 3 Caddy a) |
-| Caddy/Certbot: `API token ... invalid` or `403` | Token wrong or lacking `Zone:DNS:Edit` for your zone | Recreate the token as in [DNS-01 Credentials](#2-dns-01-credentials-or-custom-certificates) |
+| Caddy/Certbot: `API token ... invalid` or `403` | Token wrong or lacking `Zone:DNS:Edit` for your zone | Recreate the token as in [DNS Provider Credentials](#1-dns-provider-credentials) |
 | Caddy: `Caddyfile input is not formatted` warning | Spaces instead of tabs | Harmless; re-indent with tabs to silence it |
 | Response comes from your main website, not hop | DNS for `*.hop` missing, or another site block matches first | Check `dig +short test.hop.yourdomain.com` and your other server blocks |
 
@@ -634,6 +646,7 @@ curl -H "Host: myapp.localhost" http://127.0.0.1:8080/
 ## 🧠 Architecture & Behaviour Worth Knowing
 
 - **Wildcard certificates require DNS-01:** There is no HTTP-01 path to issue wildcard certificates (`*.yourdomain.com`). `hopd` disables non-DNS challenge types so configuration errors fail immediately and loudly.
+- **DNS is checked before anything else:** `hopd` asks your zone's authoritative nameservers (not a cache that may still remember "no such name") whether `<domain>` and `*.<domain>` resolve, creates missing records through the DNS provider, and otherwise waits for them. Existing records are never modified. Disable with `-dns-check=false`; skip only the record creation with `-manage-dns=false`.
 - **Staging is the default:** `-staging` defaults to `true` to protect your domain from Let's Encrypt production rate limits while setting up DNS tokens.
 - **One agent per subdomain:** Tunnels are scoped to token labels. If a connection drops, a new agent under the *same token label* reclaims the name immediately. An agent with a *different* token label is refused.
 - **45-Second Grace Hold:** If an agent temporarily drops connection, the server preserves its subdomain for 45 seconds. Requests arriving in the interim receive **HTTP 503 `Retry-After: 5`** instead of 404, preventing webhook providers from dropping or deactivating endpoints.
@@ -684,7 +697,11 @@ curl -H "Host: myapp.localhost" http://127.0.0.1:8080/
 | `-email` | *(empty)* | ACME contact email for Let's Encrypt expiry notices |
 | `-staging` | `true` | Use Let's Encrypt Staging CA (`false` for production) |
 | `-cert-dir` | `/var/lib/hop/certs` | Directory for ACME account keys and certificates |
-| `-tls-cert` | *(empty)* | Path to custom TLS certificate fullchain.pem (skips ACME/Cloudflare) |
+| `-dns-provider` | `$DNS_PROVIDER` (`cloudflare` if `CLOUDFLARE_API_TOKEN` is set) | DNS host for certificates and records; credentials come from its env vars |
+| `-dns-check` | `true` | Wait until `<domain>` and `*.<domain>` resolve before starting |
+| `-manage-dns` | `true` | Create missing A records through the DNS provider |
+| `-public-ip` | *(detected)* | Address the DNS records should point at |
+| `-tls-cert` | *(empty)* | Path to custom TLS certificate fullchain.pem (skips ACME) |
 | `-tls-key` | *(empty)* | Path to custom TLS private key.pem |
 
 ---

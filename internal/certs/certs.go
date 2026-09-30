@@ -2,7 +2,7 @@
 //
 // A wildcard name can only be validated by the DNS-01 challenge — there is no
 // HTTP-01 or TLS-ALPN-01 path to `*.example.com` — so this always talks to the
-// DNS provider, and both other challenge types are disabled so a
+// DNS provider (see package dnsprovider), and both other challenge types are disabled so a
 // misconfiguration fails loudly instead of quietly issuing a non-wildcard cert.
 package certs
 
@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
-	"github.com/libdns/cloudflare"
 )
 
 type Config struct {
@@ -24,10 +23,10 @@ type Config struct {
 	// Email is the ACME account contact. Let's Encrypt uses it for expiry
 	// warnings; optional but strongly advised.
 	Email string
-	// CloudflareToken needs Zone:Read *and* DNS:Edit on the zone. Read alone
-	// isn't enough to write the challenge record, and Edit alone isn't enough
-	// to find the zone ID.
-	CloudflareToken string
+	// DNSProvider writes the challenge TXT record. For Cloudflare, its token
+	// needs Zone:Read *and* DNS:Edit on the zone: Read alone isn't enough to
+	// write the record, and Edit alone isn't enough to find the zone ID.
+	DNSProvider certmagic.DNSProvider
 	// StorageDir holds the account key and certificates. It must survive
 	// restarts — losing it means re-issuing, which burns rate limit.
 	StorageDir string
@@ -47,8 +46,8 @@ func TLSConfig(ctx context.Context, cfg Config) (*tls.Config, error) {
 	if cfg.Domain == "" {
 		return nil, errors.New("certs: no domain")
 	}
-	if cfg.CloudflareToken == "" {
-		return nil, errors.New("certs: no Cloudflare API token (set CLOUDFLARE_API_TOKEN)")
+	if cfg.DNSProvider == nil {
+		return nil, errors.New("certs: no DNS provider")
 	}
 	if cfg.StorageDir == "" {
 		return nil, errors.New("certs: no storage directory")
@@ -67,8 +66,8 @@ func TLSConfig(ctx context.Context, cfg Config) (*tls.Config, error) {
 	acme.DisableTLSALPNChallenge = true
 	acme.DNS01Solver = &certmagic.DNS01Solver{
 		DNSManager: certmagic.DNSManager{
-			DNSProvider: &cloudflare.Provider{APIToken: cfg.CloudflareToken},
-			// Cloudflare publishes quickly, but the ACME server checks from
+			DNSProvider: cfg.DNSProvider,
+			// Most providers publish quickly, but the ACME server checks from
 			// several vantage points; give propagation room before failing.
 			PropagationTimeout: 5 * time.Minute,
 		},

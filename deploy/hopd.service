@@ -10,7 +10,9 @@ User=hop
 Group=hop
 
 # Secrets live here, not in the command line, where `ps` would show them:
+#   DNS_PROVIDER=cloudflare
 #   CLOUDFLARE_API_TOKEN=...
+# (or another provider and its credentials — see `hopd -h` for the list)
 #
 # Agent tokens are in /etc/hop/tokens instead (see -tokens-file below).
 # HOP_TOKENS=token1,token2 still works and is read alongside that file, which

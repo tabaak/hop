@@ -61,6 +61,31 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# Publishes a cask for the client to github.com/tabaak/homebrew-tap, so
+# `brew install tabaak/tap/hop` works. Pushing to another repo needs a token
+# with contents:write on it: the HOMEBREW_TAP_GITHUB_TOKEN secret.
+homebrew_casks:
+  - name: hop
+    ids: [hop]
+    repository:
+      owner: tabaak
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/tabaak/hop
+    description: Self-hosted ngrok alternative with wildcard TLS and a request inspector
+    license: MIT
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    # The binary isn't notarized; without this, macOS refuses to run it.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/hop"]
+          end
+
 changelog:
   sort: asc
   filters:

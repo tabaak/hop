@@ -40,7 +40,7 @@ If you are deploying Hop from scratch, **you must set up `hopd` first** before t
   - *Provider not listed?* Bring your own wildcard certificate (`fullchain.pem` + `privkey.pem`) and create two DNS records by hand — hopd tells you exactly which.
 - 🚪 **Firewall Ports Open**: Ports `80` (HTTP redirect), `443` (HTTPS ingress), and `7443` (agent control connection) — *(or just `7443` if running behind an existing reverse proxy)*.
 - 🐳 **Docker & Docker Compose** on your VPS (recommended, or Go 1.26+ for bare metal).
-- 🧰 **Go 1.26+** on your laptop to build the `hop` client (see [Installation](#-installation)).
+- 💻 The `hop` client on your laptop: one command with Homebrew or the install script (see [Installation](#-installation)).
 - ➡️ Start with **[Part 1: Server Setup (`hopd`)](#-part-1-server-setup-hopd)**.
 
 #### Scenario C: Local offline testing
@@ -198,15 +198,14 @@ nc -zv hop.yourdomain.com 7443
 
 If you prefer running `hopd` natively as a Linux systemd service:
 
-#### 1. Build and Install Binary
-Cross-compile locally and copy to your VPS:
+#### 1. Install the Binary
+On your VPS:
 ```sh
-# Intel/AMD VPS (x86_64)
-GOOS=linux GOARCH=amd64 go build -o hopd ./cmd/hopd
-
-# ARM VPS (Hetzner ARM, Oracle Ampere, AWS Graviton)
-GOOS=linux GOARCH=arm64 go build -o hopd ./cmd/hopd
-
+curl -fsSL https://raw.githubusercontent.com/tabaak/hop/main/install.sh | sh -s -- hopd
+```
+This installs the latest `hopd` for your VPS's architecture (x86_64 or ARM) to `/usr/local/bin/hopd`. To build it yourself instead, cross-compile on your laptop and copy it over:
+```sh
+GOOS=linux GOARCH=amd64 go build -o hopd ./cmd/hopd   # or GOARCH=arm64 for ARM VPSes
 scp hopd root@<VPS_IP>:/usr/local/bin/hopd
 ```
 
@@ -469,8 +468,18 @@ Once your `hopd` server is running (or your team administrator has given you you
 
 ### 📦 Installation
 
-There are no prebuilt packages yet (no Homebrew tap, and `go install` by module path does not resolve), so build the client from source. You need **Go 1.26+** (`go version`; any Go ≥ 1.21 will download the required toolchain automatically).
+**macOS / Linux with [Homebrew](https://brew.sh):**
+```sh
+brew install tabaak/tap/hop
+```
 
+**macOS / Linux, without Homebrew:**
+```sh
+curl -fsSL https://raw.githubusercontent.com/tabaak/hop/main/install.sh | sh
+```
+The script downloads the latest release for your platform, verifies its checksum, and installs it to `/usr/local/bin` (asking for `sudo` if needed). Set `HOP_VERSION=v1.1.0` to pin a release, or `HOP_INSTALL_DIR=~/bin` to install elsewhere. You can also download an archive yourself from the [releases page](https://github.com/tabaak/hop/releases).
+
+**From source** (needs **Go 1.26+**; any Go ≥ 1.21 downloads the required toolchain automatically):
 ```sh
 git clone https://github.com/tabaak/hop.git
 cd hop

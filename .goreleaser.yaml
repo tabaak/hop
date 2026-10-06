@@ -79,12 +79,15 @@ homebrew_casks:
       name: goreleaserbot
       email: bot@goreleaser.com
     # The binary isn't notarized; without this, macOS refuses to run it.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/hop"]
-          end
+    # Homebrew 7 deprecated `postflight` blocks (what `hooks:` generates) in
+    # favour of `postflight_steps`, which GoReleaser has no option for yet.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{" }}staged_path{{ "}}" }}/hop"],
+                                writable_paths: ["hop"]
+        end
+      end
 
 changelog:
   sort: asc

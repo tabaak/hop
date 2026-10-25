@@ -1,4 +1,31 @@
-# hop
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/hop-logo-dark.svg">
+    <img src="docs/brand/hop-logo.svg" alt="hop" height="72">
+  </picture>
+</p>
+
+<p align="center">
+  <b>Your own ngrok, on your own domain.</b><br>
+  One command puts <code>localhost</code> on public HTTPS — wildcard TLS, custom subdomains and a request inspector built in.
+</p>
+
+<p align="center">
+  <a href="#-installation"><img alt="Install: Homebrew" src="https://img.shields.io/badge/install-brew%20install%20tabaak%2Ftap%2Fhop-1F5FBF?style=for-the-badge"></a>
+  <a href="https://github.com/tabaak/hop/releases"><img alt="Releases" src="https://img.shields.io/badge/releases-latest-1A1A1A?style=for-the-badge"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-555555?style=for-the-badge"></a>
+</p>
+
+<p align="center">
+  <img alt="Go" src="https://img.shields.io/badge/Go-00ADD8?logo=go&logoColor=white">
+  <img alt="Yamux" src="https://img.shields.io/badge/Yamux-multiplexed%20tunnels-1F5FBF">
+  <img alt="Let's Encrypt" src="https://img.shields.io/badge/Let%27s%20Encrypt-DNS--01%20wildcard-003A70?logo=letsencrypt&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white">
+  <img alt="Caddy" src="https://img.shields.io/badge/Caddy-1F88C0?logo=caddy&logoColor=white">
+  <img alt="Homebrew" src="https://img.shields.io/badge/Homebrew-FBB040?logo=homebrew&logoColor=black">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white">
+  <img alt="Linux" src="https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black">
+</p>
 
 A fast, lightweight, self-hosted **ngrok alternative**. Expose local ports to the internet with automated Let's Encrypt wildcard TLS, custom subdomains, live terminal request logs, and a built-in web request inspector.
 
